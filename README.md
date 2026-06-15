@@ -7,12 +7,9 @@
 <p><strong>See where your disk space went.</strong><br/>
 A fast, beautiful macOS disk usage visualizer — built entirely in Swift.</p>
 
-[![Website](https://img.shields.io/badge/Website-ti--03.github.io%2FMacDirStat-6366f1?style=flat-square&logo=safari)](https://ti-03.github.io/MacDirStat/)
-[![macOS](https://img.shields.io/badge/macOS-14%2B-black?style=flat-square&logo=apple)](https://www.apple.com/macos/)
-[![Swift](https://img.shields.io/badge/Swift-5.10-F05138?style=flat-square&logo=swift)](https://swift.org)
-[![License](https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square)](./LICENSE)
 [![App Store](https://img.shields.io/badge/Mac_App_Store-Download-0D96F6?style=flat-square&logo=apple)](https://apps.apple.com/app/dirstat/id6766033292?mt=12)
-[![Download](https://img.shields.io/badge/Download-v1.0-007AFF?style=flat-square&logo=apple)](https://github.com/Ti-03/MacDirStat/releases)
+[![macOS](https://img.shields.io/badge/macOS-14%2B-black?style=flat-square&logo=apple)](https://www.apple.com/macos/)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square)](./LICENSE)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-FF5E5B?style=flat-square&logo=ko-fi)](https://ko-fi.com/ti003)
 
 </div>
