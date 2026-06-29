@@ -7,6 +7,7 @@
 <p><strong>See where your disk space went.</strong><br/>
 A fast, beautiful macOS disk usage visualizer — built entirely in Swift.</p>
 
+[![CI](https://github.com/Ti-03/MacDirStat/actions/workflows/ci.yml/badge.svg)](https://github.com/Ti-03/MacDirStat/actions/workflows/ci.yml)
 [![App Store](https://img.shields.io/badge/Mac_App_Store-Download-0D96F6?style=flat-square&logo=apple)](https://apps.apple.com/app/dirstat/id6766033292?mt=12)
 [![macOS](https://img.shields.io/badge/macOS-14%2B-black?style=flat-square&logo=apple)](https://www.apple.com/macos/)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square)](./LICENSE)
