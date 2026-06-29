@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build
+            ~/Library/Caches/org.swift.swiftpm
+          key: ${{ matrix.os }}-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ matrix.os }}-spm-
+
+      # Static-analysis gate: the Swift compiler (with StrictConcurrency enabled
+      # in Package.swift) type-checks and concurrency-checks all production code.
+      - name: Build
+        run: swift build -v
+
+      - name: Test
+        run: swift test
