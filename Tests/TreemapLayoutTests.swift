@@ -4,6 +4,14 @@ import SwiftUI
 
 final class TreemapLayoutTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        // ByteFormatter reads "useBinarySize" from UserDefaults. Pin it to the
+        // default (decimal / SI) so the formatter tests are deterministic
+        // regardless of any value the app left on this machine.
+        UserDefaults.standard.set(false, forKey: "useBinarySize")
+    }
+
     func test_extension_color_map_returns_consistent_color() {
         let root = makeTree([("a.pdf", 100), ("b.pdf", 200), ("c.mp4", 300)])
         let map = ExtensionColorMap(root: root)
@@ -19,15 +27,15 @@ final class TreemapLayoutTests: XCTestCase {
     }
 
     func test_byte_formatter_kb() {
-        XCTAssertEqual(ByteFormatter.string(from: 1024), "1.0 KB")
+        XCTAssertEqual(ByteFormatter.string(from: 1_000), "1.0 KB")
     }
 
     func test_byte_formatter_mb() {
-        XCTAssertEqual(ByteFormatter.string(from: 1024 * 1024), "1.0 MB")
+        XCTAssertEqual(ByteFormatter.string(from: 1_000_000), "1.0 MB")
     }
 
     func test_byte_formatter_gb() {
-        XCTAssertEqual(ByteFormatter.string(from: 1024 * 1024 * 1024), "1.0 GB")
+        XCTAssertEqual(ByteFormatter.string(from: 1_000_000_000), "1.0 GB")
     }
 
     func test_byte_formatter_bytes() {
@@ -47,66 +55,76 @@ final class TreemapLayoutTests: XCTestCase {
         return root
     }
 
-    func test_layout_single_item_fills_rect() {
+    // The layout is a radial sunburst: a node's children fill the angular range
+    // [-pi/2, 1.5*pi] (a full 2*pi circle), each child's arc proportional to its
+    // size. Cells sit in radial bands. These tests assert on angles/radii.
+    // Note: compute() needs min(width, height) > ~212 to produce any cells.
+
+    func test_layout_single_item_spans_full_circle() {
         let root = makeTree([("a.pdf", 1000)])
         let map = ExtensionColorMap(root: root)
-        let rect = CGRect(x: 0, y: 0, width: 200, height: 100)
+        let rect = CGRect(x: 0, y: 0, width: 400, height: 400)
         let cells = TreemapLayout.compute(root: root, in: rect, colorMap: map)
         XCTAssertEqual(cells.count, 1)
-        XCTAssertTrue(cells[0].rect.intersects(rect))
+        XCTAssertEqual(cells[0].endAngle - cells[0].startAngle, 2 * .pi, accuracy: 0.001)
     }
 
-    func test_layout_two_equal_items_fill_rect() {
+    func test_layout_two_equal_items_split_circle_evenly() {
         let root = makeTree([("a.pdf", 500), ("b.mp4", 500)])
         let map = ExtensionColorMap(root: root)
-        let rect = CGRect(x: 0, y: 0, width: 200, height: 100)
+        let rect = CGRect(x: 0, y: 0, width: 400, height: 400)
         let cells = TreemapLayout.compute(root: root, in: rect, colorMap: map)
         XCTAssertEqual(cells.count, 2)
-        let totalArea = cells.reduce(0.0) { $0 + $1.rect.width * $1.rect.height }
-        XCTAssertEqual(totalArea, rect.width * rect.height, accuracy: 10)
+        for cell in cells {
+            XCTAssertEqual(cell.endAngle - cell.startAngle, .pi, accuracy: 0.001)
+        }
+        let totalArc = cells.reduce(0.0) { $0 + ($1.endAngle - $1.startAngle) }
+        XCTAssertEqual(totalArc, 2 * .pi, accuracy: 0.001)
     }
 
-    func test_layout_cells_dont_overlap() {
+    func test_layout_sibling_arcs_dont_overlap() {
         let root = makeTree([("a.pdf", 300), ("b.mp4", 200), ("c.zip", 100), ("d.txt", 400)])
         let map = ExtensionColorMap(root: root)
-        let rect = CGRect(x: 0, y: 0, width: 400, height: 300)
+        let rect = CGRect(x: 0, y: 0, width: 500, height: 500)
         let cells = TreemapLayout.compute(root: root, in: rect, colorMap: map)
-        for i in 0..<cells.count {
-            for j in (i+1)..<cells.count {
-                let intersection = cells[i].rect.intersection(cells[j].rect)
-                XCTAssertTrue(intersection.isEmpty || intersection.width < 2 || intersection.height < 2,
-                              "cells \(i) and \(j) overlap: \(intersection)")
-            }
+            .sorted { $0.startAngle < $1.startAngle }
+        for i in 1..<cells.count {
+            XCTAssertGreaterThanOrEqual(cells[i].startAngle, cells[i - 1].endAngle - 0.001,
+                                        "arc \(i) overlaps the previous sibling arc")
         }
     }
 
-    func test_layout_cells_within_parent_rect() {
+    func test_layout_cells_within_radial_bounds() {
         let root = makeTree([("a.pdf", 100), ("b.mp4", 200), ("c.zip", 300)])
         let map = ExtensionColorMap(root: root)
-        let rect = CGRect(x: 0, y: 0, width: 300, height: 200)
+        let rect = CGRect(x: 0, y: 0, width: 400, height: 400)
+        let maxR = min(rect.width, rect.height) / 2 - 10
         let cells = TreemapLayout.compute(root: root, in: rect, colorMap: map)
+        XCTAssertFalse(cells.isEmpty)
         for cell in cells {
-            XCTAssertTrue(rect.contains(cell.rect) || rect.insetBy(dx: -2, dy: -2).contains(cell.rect),
-                          "cell \(cell.node.name) out of bounds: \(cell.rect)")
+            XCTAssertGreaterThanOrEqual(cell.innerRadius, TreemapLayout.centerRadius)
+            XCTAssertLessThanOrEqual(cell.outerRadius, maxR + 0.001)
+            XCTAssertGreaterThanOrEqual(cell.startAngle, -.pi / 2 - 0.001)
+            XCTAssertLessThanOrEqual(cell.endAngle, 1.5 * .pi + 0.001)
         }
     }
 
     func test_layout_empty_children_returns_no_cells() {
         let root = FSNode(url: URL(fileURLWithPath: "/"), name: "/", isDirectory: true, size: 0, fileExtension: "", parent: nil)
         let map = ExtensionColorMap(root: root)
-        let cells = TreemapLayout.compute(root: root, in: CGRect(x: 0, y: 0, width: 200, height: 100), colorMap: map)
+        let cells = TreemapLayout.compute(root: root, in: CGRect(x: 0, y: 0, width: 400, height: 400), colorMap: map)
         XCTAssertTrue(cells.isEmpty)
     }
 
-    func test_layout_larger_items_get_larger_cells() {
+    func test_layout_larger_items_get_larger_arcs() {
         let root = makeTree([("small.txt", 100), ("large.pdf", 900)])
         let map = ExtensionColorMap(root: root)
-        let rect = CGRect(x: 0, y: 0, width: 400, height: 200)
+        let rect = CGRect(x: 0, y: 0, width: 400, height: 400)
         let cells = TreemapLayout.compute(root: root, in: rect, colorMap: map)
         XCTAssertEqual(cells.count, 2)
         let largeCell = cells.first { $0.node.name == "large.pdf" }!
         let smallCell = cells.first { $0.node.name == "small.txt" }!
-        XCTAssertGreaterThan(largeCell.rect.width * largeCell.rect.height,
-                             smallCell.rect.width * smallCell.rect.height)
+        XCTAssertGreaterThan(largeCell.endAngle - largeCell.startAngle,
+                             smallCell.endAngle - smallCell.startAngle)
     }
 }
