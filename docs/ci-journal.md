@@ -55,3 +55,27 @@ which can't build a macOS SwiftUI + Sparkle app.
 **Conclusion:** for a macOS app, the local-`act` feedback loop is not available. Verification is
 done by pushing and watching GitHub Actions, or by running `swift build` / `swift test` directly
 on a Mac (which is what was done here, all 20 tests pass locally).
+
+## The matrix earned its keep: a "works on my machine" SDK bug
+
+The very first CI run was **red on both `macos-14` and `macos-15`**, despite a clean local
+`swift build`/`swift test`. The cause is exactly the class of bug the OS matrix exists to catch:
+
+- `GlassCompat.swift` calls `glassEffect(...)` and `.buttonStyle(.glass)`, which are **macOS 26
+  (Liquid Glass) APIs**. They only exist in the macOS 26 SDK (Xcode 26 / Swift 6.2).
+- My local machine runs macOS 26 with the Xcode 26 SDK, so it compiled fine. GitHub's `macos-14`
+  / `macos-15` runners ship Xcode 16.x with the macOS 14/15 SDK, where those symbols **do not
+  exist**, so the build failed (~300 errors, plus cascading errors in `ContentView` which calls
+  the helpers).
+- The original code guarded the calls with `if #available(macOS 26, *)`. That is a **runtime**
+  check, it does not stop the compiler from needing the symbol at build time. So `#available`
+  alone cannot make code compile against an SDK that lacks the API.
+
+**Fix:** wrap each macOS-26-only call in a **compile-time** `#if compiler(>=6.2)` (Swift 6.2 ships
+with the Xcode 26 / macOS 26 SDK). Older toolchains compile only the `NSVisualEffectView`-based
+fallback; the runtime `#available` stays inside the new-SDK branch so an Xcode-26 build still
+back-deploys correctly to macOS 14/15. After this fix the matrix goes green on all runners.
+
+**Lesson:** a green local build proves nothing about other SDKs. The OS matrix turned a latent
+portability bug (that would have bitten anyone building the package without the macOS 26 SDK) into
+a one-PR fix.
