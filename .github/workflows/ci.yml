@@ -12,7 +12,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, macos-15]
+        # macos-15 ships Xcode 16 (Swift 6.1): exercises the older-SDK fallback
+        # compile path. macos-26 ships Xcode 26 (Swift 6.2): the real shipping
+        # toolchain, with the macOS 26 SDK and Liquid Glass. The app uses
+        # MeshGradient (macOS 15) and glassEffect (macOS 26), so it needs the
+        # macOS 15+ SDK to compile, macos-14 cannot build it.
+        os: [macos-15, macos-26]
     steps:
       - uses: actions/checkout@v4
 

@@ -7,8 +7,11 @@ to MacDirStat.
 
 A single matrixed job, `build-test`, runs on every push to `main` and every PR:
 
-- **runs-on:** `macos-14` and `macos-15` (the matrix, MacDirStat is a macOS-only
-  SwiftUI app, so it cannot build on Linux runners).
+- **runs-on:** `macos-15` and `macos-26` (the matrix, MacDirStat is a macOS-only
+  SwiftUI app, so it cannot build on Linux runners). `macos-15` ships Xcode 16
+  (Swift 6.1) and exercises the older-SDK fallback compile path; `macos-26` ships
+  Xcode 26 (Swift 6.2), the real shipping toolchain with Liquid Glass. See the
+  matrix note at the bottom for why `macos-14` was dropped.
 - **Caching:** SwiftPM `.build` + `~/Library/Caches/org.swift.swiftpm`, keyed on `Package.resolved`.
 - **Build (static-analysis gate):** `swift build`. The Swift compiler type-checks and, with
   `StrictConcurrency` enabled in `Package.swift`, concurrency-checks all production code. This
@@ -79,3 +82,18 @@ back-deploys correctly to macOS 14/15. After this fix the matrix goes green on a
 **Lesson:** a green local build proves nothing about other SDKs. The OS matrix turned a latent
 portability bug (that would have bitten anyone building the package without the macOS 26 SDK) into
 a one-PR fix.
+
+### ...and then it caught a second one: `macos-14` can't build the app at all
+
+With the glass code guarded, `macos-15` went green but `macos-14` still failed, this time on
+`ContentView.swift`: `cannot find 'MeshGradient' in scope`. `MeshGradient` is a **macOS 15** API,
+so the macOS 14 SDK doesn't have it either (and, like `glassEffect`, it's behind a runtime
+`if #available(macOS 15, *)` that can't help at compile time). The app genuinely uses macOS 15 and
+macOS 26 APIs, so it **requires the macOS 15+ SDK to compile**; `macos-14` was simply the wrong
+runner. I would rather guard `MeshGradient` than gut a real piece of UI, so the fix here was the
+matrix itself: dropped `macos-14` and settled on **`[macos-15, macos-26]`**, which compiles cleanly
+and still tests both the fallback path (15) and the real Liquid Glass path (26).
+
+**Takeaway:** the deployment target (macOS 14, via `#available`) and the *build* SDK are different
+things. You back-deploy at runtime, but you must compile against an SDK new enough to contain every
+symbol you reference.
