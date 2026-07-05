@@ -73,6 +73,10 @@ Pure Swift + SwiftUI — no Electron, no web views, no dependencies.
 | Haptics | `NSHapticFeedbackManager` — intensity scales with file size |
 | Duplicates | SHA-256 content hashing on a background actor |
 
+## Documentation
+
+Tutorial, how-to guides, and API reference: **[docs site](https://ti-03.github.io/MacDirStat/guide/)**. Architecture decisions are recorded in [`docs/adr/`](docs/adr).
+
 ## Privacy
 
 MacDirStat collects zero data. No network access. No analytics. No tracking. Everything runs on your device. [Full privacy policy](https://ti-03.github.io/MacDirStat/privacy.html).
