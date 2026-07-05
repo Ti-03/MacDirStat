@@ -95,11 +95,15 @@ public struct TreemapLayout {
 
     // ── Color assignment ─────────────────────────────────────────────────────
 
+    static func directoryHue(for name: String) -> Double {
+        let hash = name.utf8.reduce(UInt32(5381)) { ($0 &<< 5) &+ $0 &+ UInt32($1) }
+        return Double(hash % 360) / 360.0
+    }
+
     private static func color(for node: FSNode, depth: Int, colorMap: ExtensionColorMap) -> Color {
         if node.isDirectory {
             // Directories: muted tinted containers — hue from name hash, low saturation
-            let hash = abs(node.name.hashValue) % 360
-            let hue  = Double(hash) / 360.0
+            let hue  = directoryHue(for: node.name)
             let fade = Double(depth) * 0.05
             return Color(hue: hue,
                          saturation: max(0.12, 0.28 - fade),
