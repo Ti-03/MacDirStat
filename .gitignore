@@ -25,6 +25,9 @@ DerivedData/
 # Test results
 *.xcresult
 
+# MkDocs build output (built by CI, not committed)
+/site/
+
 # Amore / Sparkle private signing keys — NEVER commit these
 *.private
 sparkle_private_key

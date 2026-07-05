@@ -1,0 +1,27 @@
+site_name: MacDirStat Docs
+site_url: https://ti-03.github.io/MacDirStat/guide/
+repo_url: https://github.com/Ti-03/MacDirStat
+docs_dir: guide
+site_dir: site
+
+theme:
+  name: material
+  palette:
+    scheme: slate
+    primary: deep orange
+  features:
+    - navigation.sections
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - Tutorial: tutorial/first-scan.md
+  - How-to guides:
+      - Read the treemap: how-to/read-the-treemap.md
+  - Reference:
+      - ByteFormatter: reference/byte-formatter.md
+      - TreemapLayout: reference/treemap-layout.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences

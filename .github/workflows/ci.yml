@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-15 ships Xcode 16 (Swift 6.1): exercises the older-SDK fallback
+        # compile path. macos-26 ships Xcode 26 (Swift 6.2): the real shipping
+        # toolchain, with the macOS 26 SDK and Liquid Glass. The app uses
+        # MeshGradient (macOS 15) and glassEffect (macOS 26), so it needs the
+        # macOS 15+ SDK to compile, macos-14 cannot build it.
+        os: [macos-15, macos-26]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build
+            ~/Library/Caches/org.swift.swiftpm
+          key: ${{ matrix.os }}-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ matrix.os }}-spm-
+
+      # Static-analysis gate: the Swift compiler (with StrictConcurrency enabled
+      # in Package.swift) type-checks and concurrency-checks all production code.
+      - name: Build
+        run: swift build -v
+
+      - name: Test
+        run: swift test

@@ -7,6 +7,7 @@
 <p><strong>See where your disk space went.</strong><br/>
 A fast, beautiful macOS disk usage visualizer — built entirely in Swift.</p>
 
+[![CI](https://github.com/Ti-03/MacDirStat/actions/workflows/ci.yml/badge.svg)](https://github.com/Ti-03/MacDirStat/actions/workflows/ci.yml)
 [![App Store](https://img.shields.io/badge/Mac_App_Store-Download-0D96F6?style=flat-square&logo=apple)](https://apps.apple.com/app/dirstat/id6766033292?mt=12)
 [![macOS](https://img.shields.io/badge/macOS-14%2B-black?style=flat-square&logo=apple)](https://www.apple.com/macos/)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square)](./LICENSE)
@@ -71,6 +72,10 @@ Pure Swift + SwiftUI — no Electron, no web views, no dependencies.
 | Renderer | SwiftUI `Canvas` — draws 1,000+ arcs at 30 fps |
 | Haptics | `NSHapticFeedbackManager` — intensity scales with file size |
 | Duplicates | SHA-256 content hashing on a background actor |
+
+## Documentation
+
+Tutorial, how-to guides, and API reference: **[docs site](https://ti-03.github.io/MacDirStat/guide/)**. Architecture decisions are recorded in [`docs/adr/`](docs/adr).
 
 ## Privacy
 
