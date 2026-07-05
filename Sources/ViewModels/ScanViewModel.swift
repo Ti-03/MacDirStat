@@ -249,45 +249,78 @@ public final class ScanViewModel: ObservableObject {
         return current
     }
 
+    // Returns the allocated disk size (st_blocks * 512) for a path via lstat, or nil if
+    // the path can't be stat'd or is a symlink.
+    private nonisolated static func lstatInfo(path: String) -> (isDir: Bool, isSymlink: Bool, allocatedSize: Int64)? {
+        var st = stat()
+        guard lstat(path, &st) == 0 else { return nil }
+        let mode = st.st_mode & S_IFMT
+        let isSymlink = mode == S_IFLNK
+        let isDir = mode == S_IFDIR
+        let allocatedSize = Int64(st.st_blocks) * 512
+        return (isDir, isSymlink, allocatedSize)
+    }
+
+    // Parses the excludedFolderNames default the same way FileScanner does.
+    private nonisolated static func parseExcludedNames() -> Set<String> {
+        let raw = UserDefaults.standard.string(forKey: "excludedFolderNames")
+            ?? ".git,node_modules,DerivedData,.Trash"
+        return Set(raw.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+    }
+
     // Re-stat the directory on disk and update children to match.
     // Returns true if anything changed (additions/removals/size changes).
     @discardableResult
-    private nonisolated static func refreshDirectory(node: FSNode) -> Bool {
+    nonisolated static func refreshDirectory(node: FSNode) -> Bool {
         guard node.isDirectory else { return false }
         let fm = FileManager.default
+        let showHiddenFiles = UserDefaults.standard.bool(forKey: "showHiddenFiles")
+        let excludedNames = parseExcludedNames()
         guard let entries = try? fm.contentsOfDirectory(
             at: node.url,
-            includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey, .isSymbolicLinkKey],
-            options: [.skipsHiddenFiles]
+            includingPropertiesForKeys: nil,
+            options: showHiddenFiles ? [] : [.skipsHiddenFiles]
         ) else { return false }
 
-        let onDisk = Dictionary(uniqueKeysWithValues: entries.map { ($0.lastPathComponent, $0) })
+        // Filter out excluded folder names and symlinks up front, so both the
+        // removal pass and the add/update pass agree on what's "on disk".
+        var onDisk: [String: (url: URL, info: (isDir: Bool, isSymlink: Bool, allocatedSize: Int64))] = [:]
+        for url in entries {
+            let name = url.lastPathComponent
+            if excludedNames.contains(name) { continue }
+            guard let info = lstatInfo(path: url.path) else { continue }
+            if info.isSymlink { continue }
+            onDisk[name] = (url, info)
+        }
+
         var changed = false
 
-        // Remove children that no longer exist
+        // Remove children that no longer exist (or are now excluded/symlinks)
         let before = node.children.count
         node.children.removeAll { !onDisk.keys.contains($0.name) }
         if node.children.count != before { changed = true }
 
         // Add or update children
-        for (name, url) in onDisk {
+        for (name, entry) in onDisk {
+            let (url, info) = entry
             if let existing = node.children.first(where: { $0.name == name }) {
                 // Update size for files (directories update via recursive bubble)
-                if !existing.isDirectory,
-                   let attrs = try? url.resourceValues(forKeys: [.fileSizeKey]),
-                   let newSize = attrs.fileSize.map(Int64.init) {
+                if !existing.isDirectory {
+                    let newSize = info.allocatedSize
                     if existing.size != newSize {
                         existing.size = newSize
                         changed = true
                     }
                 }
+            } else if info.isDir {
+                // New directory — scan its whole subtree so it isn't left as a 0-byte leaf.
+                let child = scanSubtree(url: url, parent: node, showHiddenFiles: showHiddenFiles, excludedNames: excludedNames)
+                node.children.append(child)
+                changed = true
             } else {
-                // New entry — create a minimal FSNode
-                let attrs = try? url.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
-                let isDir = attrs?.isDirectory ?? false
-                let size = (attrs?.fileSize).map(Int64.init) ?? 0
-                let ext = isDir ? "" : url.pathExtension.lowercased()
-                let child = FSNode(url: url, name: name, isDirectory: isDir, size: size, fileExtension: ext, parent: node)
+                // New file
+                let ext = url.pathExtension.lowercased()
+                let child = FSNode(url: url, name: name, isDirectory: false, size: info.allocatedSize, fileExtension: ext, parent: node)
                 child.safetyLevel = SafetyAnalyzer.level(for: child)
                 node.children.append(child)
                 changed = true
@@ -298,6 +331,58 @@ public final class ScanViewModel: ObservableObject {
             node.children.sort { $0.size > $1.size }
         }
         return changed
+    }
+
+    // Synchronously walks a newly-discovered directory subtree, applying the same rules
+    // as the initial scan: skip symlinks, skip hidden files unless showHiddenFiles, skip
+    // excludedNames, allocated sizes via lstat, directory size = sum of children.
+    private nonisolated static func scanSubtree(
+        url: URL,
+        parent: FSNode?,
+        showHiddenFiles: Bool,
+        excludedNames: Set<String>
+    ) -> FSNode {
+        let name = url.lastPathComponent
+        guard let info = lstatInfo(path: url.path), info.isDir else {
+            // Not actually a directory (or vanished) — return an empty leaf; caller only
+            // invokes this when it already believes the entry is a directory.
+            return FSNode(url: url, name: name, isDirectory: false, size: 0, fileExtension: url.pathExtension.lowercased(), parent: parent)
+        }
+
+        let node = FSNode(url: url, name: name, isDirectory: true, size: 0, fileExtension: "", parent: parent)
+        node.safetyLevel = SafetyAnalyzer.level(for: node)
+
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: nil,
+            options: showHiddenFiles ? [] : [.skipsHiddenFiles]
+        ) else { return node }
+
+        var children: [FSNode] = []
+        var totalSize: Int64 = 0
+        for childURL in entries {
+            let childName = childURL.lastPathComponent
+            if excludedNames.contains(childName) { continue }
+            guard let childInfo = lstatInfo(path: childURL.path) else { continue }
+            if childInfo.isSymlink { continue }
+
+            let child: FSNode
+            if childInfo.isDir {
+                child = scanSubtree(url: childURL, parent: node, showHiddenFiles: showHiddenFiles, excludedNames: excludedNames)
+            } else {
+                let ext = childURL.pathExtension.lowercased()
+                child = FSNode(url: childURL, name: childName, isDirectory: false, size: childInfo.allocatedSize, fileExtension: ext, parent: node)
+                child.safetyLevel = SafetyAnalyzer.level(for: child)
+            }
+            children.append(child)
+            totalSize += child.size
+        }
+
+        children.sort { $0.size > $1.size }
+        node.children = children
+        node.size = totalSize
+        return node
     }
 
     // Walk up the parent chain recalculating folder sizes from their children.
