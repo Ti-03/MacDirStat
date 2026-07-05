@@ -26,6 +26,6 @@ public final class FSNode: Identifiable, @unchecked Sendable {
 public extension FSNode {
     var optionalChildren: [FSNode]? {
         guard isDirectory && !children.isEmpty else { return nil }
-        return children.count > 2_000 ? Array(children.prefix(2_000)) : children
+        return children
     }
 }

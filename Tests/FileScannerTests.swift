@@ -31,6 +31,15 @@ final class FileScannerTests: XCTestCase {
         XCTAssertNil(child.parent)
     }
 
+    func test_optional_children_returns_all_children() {
+        let dir = FSNode(url: URL(fileURLWithPath: "/tmp"), name: "tmp", isDirectory: true, size: 0, fileExtension: "", parent: nil)
+        for i in 0..<2001 {
+            let child = FSNode(url: URL(fileURLWithPath: "/tmp/\(i)"), name: "\(i)", isDirectory: false, size: 1, fileExtension: "txt", parent: dir)
+            dir.children.append(child)
+        }
+        XCTAssertEqual(dir.optionalChildren?.count, 2001)
+    }
+
     func test_scanner_builds_tree_from_temp_directory() async throws {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
