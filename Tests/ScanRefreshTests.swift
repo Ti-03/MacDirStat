@@ -32,6 +32,35 @@ final class ScanRefreshTests: XCTestCase {
         XCTAssertEqual(updated?.size, expectedSize, "refresh must use allocated size (st_blocks * 512), not logical size")
     }
 
+    func test_refresh_preserves_hardlink_dedup() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let hard1 = tmp.appendingPathComponent("hard1.bin")
+        let hard2 = tmp.appendingPathComponent("hard2.bin")
+        try Data(repeating: 1, count: 262_144).write(to: hard1)
+        try FileManager.default.linkItem(at: hard1, to: hard2)
+        let fullSize = allocatedSize(at: hard1.path)
+        XCTAssertGreaterThan(fullSize, 0)
+
+        // Initial scan counts a hardlinked inode once: hard1 keeps the size, hard2 is 0.
+        let dirNode = FSNode(url: tmp, name: tmp.lastPathComponent, isDirectory: true, size: fullSize, fileExtension: "", parent: nil)
+        let winner = FSNode(url: hard1, name: "hard1.bin", isDirectory: false, size: fullSize, fileExtension: "bin", parent: dirNode)
+        let loser = FSNode(url: hard2, name: "hard2.bin", isDirectory: false, size: 0, fileExtension: "bin", parent: dirNode)
+        dirNode.children = [winner, loser]
+
+        // Unrelated change in the same directory triggers a refresh.
+        try Data(repeating: 9, count: 4096).write(to: tmp.appendingPathComponent("other.bin"))
+
+        ScanViewModel.refreshDirectory(node: dirNode)
+
+        let refreshedLoser = dirNode.children.first { $0.name == "hard2.bin" }
+        let refreshedWinner = dirNode.children.first { $0.name == "hard1.bin" }
+        XCTAssertEqual(refreshedLoser?.size, 0, "refresh must not resurrect a deduplicated hardlink to full size")
+        XCTAssertEqual(refreshedWinner?.size, fullSize)
+    }
+
     func test_refresh_scans_new_directory_recursively() throws {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)

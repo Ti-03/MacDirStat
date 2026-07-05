@@ -251,14 +251,14 @@ public final class ScanViewModel: ObservableObject {
 
     // Returns the allocated disk size (st_blocks * 512) for a path via lstat, or nil if
     // the path can't be stat'd or is a symlink.
-    private nonisolated static func lstatInfo(path: String) -> (isDir: Bool, isSymlink: Bool, allocatedSize: Int64)? {
+    private nonisolated static func lstatInfo(path: String) -> (isDir: Bool, isSymlink: Bool, allocatedSize: Int64, linkCount: Int)? {
         var st = stat()
         guard lstat(path, &st) == 0 else { return nil }
         let mode = st.st_mode & S_IFMT
         let isSymlink = mode == S_IFLNK
         let isDir = mode == S_IFDIR
         let allocatedSize = Int64(st.st_blocks) * 512
-        return (isDir, isSymlink, allocatedSize)
+        return (isDir, isSymlink, allocatedSize, Int(st.st_nlink))
     }
 
     // Parses the excludedFolderNames default the same way FileScanner does.
@@ -284,7 +284,7 @@ public final class ScanViewModel: ObservableObject {
 
         // Filter out excluded folder names and symlinks up front, so both the
         // removal pass and the add/update pass agree on what's "on disk".
-        var onDisk: [String: (url: URL, info: (isDir: Bool, isSymlink: Bool, allocatedSize: Int64))] = [:]
+        var onDisk: [String: (url: URL, info: (isDir: Bool, isSymlink: Bool, allocatedSize: Int64, linkCount: Int))] = [:]
         for url in entries {
             let name = url.lastPathComponent
             if excludedNames.contains(name) { continue }
@@ -306,6 +306,9 @@ public final class ScanViewModel: ObservableObject {
             if let existing = node.children.first(where: { $0.name == name }) {
                 // Update size for files (directories update via recursive bubble)
                 if !existing.isDirectory {
+                    // A 0-byte node for a multi-link inode is a hardlink the initial scan
+                    // already counted elsewhere — re-statting it would double-count.
+                    if info.linkCount > 1 && existing.size == 0 { continue }
                     let newSize = info.allocatedSize
                     if existing.size != newSize {
                         existing.size = newSize
