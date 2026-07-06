@@ -140,6 +140,7 @@ public actor DuplicateDetector {
         var remaining = maxBytes
         let chunkSize = min(65_536, maxBytes)
         while remaining > 0 {
+            if Task.isCancelled { return nil }
             let toRead = min(chunkSize, remaining)
             let chunk: Data? = autoreleasepool { try? handle.read(upToCount: toRead) }
             guard let chunk, !chunk.isEmpty else { break }
@@ -157,6 +158,7 @@ public actor DuplicateDetector {
         var hasher = SHA256()
         let chunkSize = 1024 * 1024
         while true {
+            if Task.isCancelled { return nil }
             let chunk: Data? = autoreleasepool { try? handle.read(upToCount: chunkSize) }
             guard let chunk, !chunk.isEmpty else { break }
             hasher.update(data: chunk)
