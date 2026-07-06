@@ -1,0 +1,151 @@
+import SwiftUI
+import AppKit
+
+/// Guided Full Disk Access onboarding. macOS provides no API to grant FDA
+/// programmatically, so the best achievable flow is: explain what's blocked and why,
+/// jump straight to the right System Settings pane, detect the grant while the sheet
+/// is open, then offer to relaunch (required for the new permission to take effect)
+/// and auto-resume the scan the user was on.
+struct FullDiskAccessSheet: View {
+    @EnvironmentObject private var vm: ScanViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 22) {
+            if vm.hasFullDiskAccess {
+                grantedState
+            } else {
+                missingState
+            }
+        }
+        .padding(28)
+        .frame(width: 460)
+        .task {
+            // Poll for a live permission change while the sheet is on screen — macOS
+            // has no notification for TCC grants, so this is the only way to react
+            // to the user flipping the toggle in System Settings without closing us.
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1.5))
+                guard !Task.isCancelled else { break }
+                vm.recheckFullDiskAccess()
+            }
+        }
+    }
+
+    // MARK: - State A: access missing
+
+    private var missingState: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "lock.shield")
+                .font(.system(size: 44, weight: .medium))
+                .foregroundStyle(.tint)
+                .symbolRenderingMode(.hierarchical)
+                .padding(22)
+                .glassTintedCard(tint: .accentColor, cornerRadius: 200)
+
+            VStack(spacing: 8) {
+                Text("See your whole disk")
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                Text(explainerBody)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            steps
+
+            VStack(spacing: 10) {
+                Button("Open System Settings") {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
+                }
+                .keyboardShortcut(.defaultAction)
+                .glassProminentButton()
+                .controlSize(.large)
+                .frame(maxWidth: .infinity)
+
+                Button("Not Now") { dismiss() }
+                    .glassButton()
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity)
+
+                Button("Don't ask again") {
+                    UserDefaults.standard.set(true, forKey: "fdaPromptSuppressed")
+                    dismiss()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private var explainerBody: String {
+        let base = "macOS protects some folders (Documents, Desktop, other apps' data) until you grant Full Disk Access. MacDirStat reads sizes only — nothing is modified, collected, or sent anywhere."
+        guard vm.deniedCount > 0 else { return base }
+        let folders = vm.deniedCount == 1 ? "1 folder was" : "\(vm.deniedCount) folders were"
+        return "\(base) \(folders) blocked during your last scan."
+    }
+
+    private var steps: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            stepRow(1, "Open System Settings")
+            stepRow(2, "Find MacDirStat in the list and switch it on")
+            stepRow(3, "Come back here — we'll take it from there")
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassCard(cornerRadius: 14)
+    }
+
+    private func stepRow(_ number: Int, _ text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text("\(number)")
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .frame(width: 18, height: 18)
+                .background(Circle().fill(.tint))
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundStyle(.primary)
+        }
+    }
+
+    // MARK: - State B: access granted, needs relaunch
+
+    private var grantedState: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "checkmark.shield.fill")
+                .font(.system(size: 44, weight: .medium))
+                .foregroundStyle(.green)
+                .symbolRenderingMode(.hierarchical)
+                .padding(22)
+                .glassTintedCard(tint: .green, cornerRadius: 200)
+
+            VStack(spacing: 8) {
+                Text("Access granted!")
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                Text("MacDirStat needs to relaunch for macOS to apply the new permission. It will rescan automatically.")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(spacing: 10) {
+                Button("Relaunch & Rescan") {
+                    vm.relaunchForFullDiskAccess()
+                }
+                .keyboardShortcut(.defaultAction)
+                .glassProminentButton()
+                .controlSize(.large)
+                .frame(maxWidth: .infinity)
+
+                Button("Later") { dismiss() }
+                    .glassButton()
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+    }
+}

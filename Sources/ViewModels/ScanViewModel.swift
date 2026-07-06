@@ -21,6 +21,7 @@ public final class ScanViewModel: ObservableObject {
     @Published public var hasFullDiskAccess: Bool = true
     @Published public var isWatching: Bool = false
     @Published public var deniedCount: Int = 0
+    @Published public var showFDASheet: Bool = false
 
     public var treemapRoot: FSNode? { drillStack.last ?? root }
 
@@ -35,6 +36,7 @@ public final class ScanViewModel: ObservableObject {
     private var layoutGeneration: Int = 0
     private var securityScopedURL: URL?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
+    private var fdaSheetShownThisLaunch = false
 
     public init() {
         UserDefaults.standard.register(defaults: [
@@ -49,7 +51,21 @@ public final class ScanViewModel: ObservableObject {
         ])
         setupMemoryPressureHandler()
         checkFullDiskAccess()
-        if UserDefaults.standard.bool(forKey: "autoScanLastFolder"),
+
+        // A relaunch triggered from the Full Disk Access flow leaves behind the path
+        // that was being scanned, so the new instance can resume right where the user
+        // left off instead of landing back on the welcome screen.
+        var resumedPendingRescan = false
+        if let pending = UserDefaults.standard.string(forKey: "fdaPendingRescanPath") {
+            UserDefaults.standard.removeObject(forKey: "fdaPendingRescanPath")
+            if FileManager.default.fileExists(atPath: pending) {
+                scan(url: URL(fileURLWithPath: pending))
+                resumedPendingRescan = true
+            }
+        }
+
+        if !resumedPendingRescan,
+           UserDefaults.standard.bool(forKey: "autoScanLastFolder"),
            let path = UserDefaults.standard.string(forKey: "lastScannedPath"),
            FileManager.default.fileExists(atPath: path) {
             scan(url: URL(fileURLWithPath: path))
@@ -64,6 +80,44 @@ public final class ScanViewModel: ObservableObject {
         // TCC.db is only readable when Full Disk Access is granted
         let probe = "/Library/Application Support/com.apple.TCC/TCC.db"
         hasFullDiskAccess = FileManager.default.isReadableFile(atPath: probe)
+    }
+
+    /// Public wrapper so the onboarding sheet can poll for a live permission change
+    /// without exposing the private TCC probe itself.
+    public func recheckFullDiskAccess() {
+        checkFullDiskAccess()
+    }
+
+    /// Pure decision logic for whether the guided Full Disk Access sheet should be
+    /// offered after a scan completes: only when access is actually missing, the scan
+    /// hit blocked folders, and the user hasn't opted out.
+    nonisolated static func shouldOfferFullDiskAccess(deniedCount: Int, hasFullDiskAccess: Bool, suppressed: Bool) -> Bool {
+        !hasFullDiskAccess && deniedCount > 0 && !suppressed
+    }
+
+    /// Relaunches the app so macOS re-evaluates the Full Disk Access grant, and leaves
+    /// a breadcrumb so the new instance automatically resumes the scan the user was on.
+    public func relaunchForFullDiskAccess() {
+        let pathToResume = scanURL?.path ?? UserDefaults.standard.string(forKey: "lastScannedPath")
+        if let pathToResume {
+            UserDefaults.standard.set(pathToResume, forKey: "fdaPendingRescanPath")
+        }
+
+        guard Bundle.main.bundlePath.hasSuffix(".app") else {
+            // Debug binary, not an app bundle — there's nothing to relaunch
+            // programmatically. The developer restarts the process by hand.
+            NSApp.terminate(nil)
+            return
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, _ in
+            // Give the new instance a moment to spawn before this one exits.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                NSApp.terminate(nil)
+            }
+        }
     }
 
     private func setupMemoryPressureHandler() {
@@ -121,6 +175,15 @@ public final class ScanViewModel: ObservableObject {
                 case .completed(let node, let denied):
                     self.isScanning = false
                     self.deniedCount = denied
+                    if !self.fdaSheetShownThisLaunch,
+                       Self.shouldOfferFullDiskAccess(
+                           deniedCount: denied,
+                           hasFullDiskAccess: self.hasFullDiskAccess,
+                           suppressed: UserDefaults.standard.bool(forKey: "fdaPromptSuppressed")
+                       ) {
+                        self.showFDASheet = true
+                        self.fdaSheetShownThisLaunch = true
+                    }
                     // If the scanned root is a volume mount point, the file total will
                     // always fall short of Finder's "used" figure (APFS snapshots,
                     // purgeable space, excluded/unreadable folders). Make that gap
