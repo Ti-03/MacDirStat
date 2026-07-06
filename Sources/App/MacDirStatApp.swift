@@ -40,6 +40,11 @@ struct MacDirStatApp: App {
                     NSWorkspace.shared.open(URL(string: "https://ti-03.github.io/MacDirStat/")!)
                 }
             }
+            CommandGroup(after: .help) {
+                Button("Grant Full Disk Access…") {
+                    vm.showFDASheet = true
+                }
+            }
         }
     }
 }
