@@ -297,6 +297,7 @@ private func _listDirectory(path: String, url: URL, rootDev: dev_t?, node: FSNod
                     let allocSize = allocatedSize(st: st, visited: visited)
                     let ext = childURL.pathExtension.lowercased()
                     let fileNode = FSNode(url: childURL, name: name, isDirectory: false, size: allocSize, fileExtension: ext, parent: node)
+                    if st.st_nlink > 1 { fileNode.hardLinkRef = hardLinkRef(of: st) }
                     result.children.append(fileNode)
                     result.totalSize += allocSize
                     result.itemCount += 1
@@ -320,6 +321,7 @@ private func _listDirectory(path: String, url: URL, rootDev: dev_t?, node: FSNod
             let allocSize = allocatedSize(st: st, visited: visited)
             let ext = childURL.pathExtension.lowercased()
             let fileNode = FSNode(url: childURL, name: name, isDirectory: false, size: allocSize, fileExtension: ext, parent: node)
+            if st.st_nlink > 1 { fileNode.hardLinkRef = hardLinkRef(of: st) }
             result.children.append(fileNode)
             result.totalSize += allocSize
             result.itemCount += 1
@@ -329,6 +331,12 @@ private func _listDirectory(path: String, url: URL, rootDev: dev_t?, node: FSNod
     }
 
     return result
+}
+
+// Builds the inode identity for a hardlinked file. dev_t is a signed 32-bit value
+// (can be negative for synthetic filesystems), so use bit-pattern conversion.
+private func hardLinkRef(of st: stat) -> HardLinkRef {
+    HardLinkRef(dev: UInt64(bitPattern: Int64(st.st_dev)), ino: UInt64(st.st_ino))
 }
 
 // Returns the file's allocated disk bytes, deduplicating hardlinks via the visited set.

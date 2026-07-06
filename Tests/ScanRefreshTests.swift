@@ -32,6 +32,97 @@ final class ScanRefreshTests: XCTestCase {
         XCTAssertEqual(updated?.size, expectedSize, "refresh must use allocated size (st_blocks * 512), not logical size")
     }
 
+    // Returns the (dev, ino) identity for a path the way the scanner records it.
+    private func ref(at path: String) -> HardLinkRef {
+        var st = stat()
+        precondition(lstat(path, &st) == 0)
+        return HardLinkRef(dev: UInt64(bitPattern: Int64(st.st_dev)), ino: UInt64(st.st_ino))
+    }
+
+    func test_refresh_new_hardlink_not_double_counted() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let orig = tmp.appendingPathComponent("orig.bin")
+        try Data(repeating: 1, count: 262_144).write(to: orig)
+        let fullSize = allocatedSize(at: orig.path)
+
+        // Tree state as the initial scan left it: only orig.bin existed then.
+        let dirNode = FSNode(url: tmp, name: tmp.lastPathComponent, isDirectory: true, size: fullSize, fileExtension: "", parent: nil)
+        let origNode = FSNode(url: orig, name: "orig.bin", isDirectory: false, size: fullSize, fileExtension: "bin", parent: dirNode)
+        origNode.hardLinkRef = ref(at: orig.path)
+        dirNode.children = [origNode]
+
+        // A new hardlink appears after the scan.
+        let newLink = tmp.appendingPathComponent("newlink.bin")
+        try FileManager.default.linkItem(at: orig, to: newLink)
+
+        ScanViewModel.refreshDirectory(node: dirNode)
+
+        let linkNode = dirNode.children.first { $0.name == "newlink.bin" }
+        XCTAssertNotNil(linkNode)
+        XCTAssertEqual(linkNode?.size, 0, "a new name for an already-counted inode must not add size")
+        XCTAssertNotNil(linkNode?.hardLinkRef)
+        let total = dirNode.children.reduce(Int64(0)) { $0 + $1.size }
+        XCTAssertEqual(total, fullSize, "directory total must not double-count the inode")
+    }
+
+    func test_refresh_promotes_survivor_when_winner_deleted() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let hard1 = tmp.appendingPathComponent("hard1.bin")
+        let hard2 = tmp.appendingPathComponent("hard2.bin")
+        let hard3 = tmp.appendingPathComponent("hard3.bin")
+        try Data(repeating: 2, count: 262_144).write(to: hard1)
+        try FileManager.default.linkItem(at: hard1, to: hard2)
+        try FileManager.default.linkItem(at: hard1, to: hard3)
+        let fullSize = allocatedSize(at: hard1.path)
+        let inodeRef = ref(at: hard1.path)
+
+        // Tree as the initial scan left it: hard1 carries the size, the others are 0.
+        let dirNode = FSNode(url: tmp, name: tmp.lastPathComponent, isDirectory: true, size: fullSize, fileExtension: "", parent: nil)
+        let winner = FSNode(url: hard1, name: "hard1.bin", isDirectory: false, size: fullSize, fileExtension: "bin", parent: dirNode)
+        let loser2 = FSNode(url: hard2, name: "hard2.bin", isDirectory: false, size: 0, fileExtension: "bin", parent: dirNode)
+        let loser3 = FSNode(url: hard3, name: "hard3.bin", isDirectory: false, size: 0, fileExtension: "bin", parent: dirNode)
+        for n in [winner, loser2, loser3] { n.hardLinkRef = inodeRef }
+        dirNode.children = [winner, loser2, loser3]
+
+        // The size-carrying link is deleted; the inode still exists via the survivors.
+        try FileManager.default.removeItem(at: hard1)
+
+        ScanViewModel.refreshDirectory(node: dirNode)
+
+        XCTAssertEqual(dirNode.children.count, 2)
+        let sizes = dirNode.children.map(\.size).sorted(by: >)
+        XCTAssertEqual(sizes, [fullSize, 0], "one survivor must be promoted to carry the inode's size")
+    }
+
+    func test_scan_subtree_dedupes_internal_hardlinks() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        // Tree as scanned: empty directory.
+        let dirNode = FSNode(url: tmp, name: tmp.lastPathComponent, isDirectory: true, size: 0, fileExtension: "", parent: nil)
+
+        // A new directory appears containing two links to one inode.
+        let newDir = tmp.appendingPathComponent("newdir")
+        try FileManager.default.createDirectory(at: newDir, withIntermediateDirectories: true)
+        let a = newDir.appendingPathComponent("a.bin")
+        try Data(repeating: 3, count: 262_144).write(to: a)
+        try FileManager.default.linkItem(at: a, to: newDir.appendingPathComponent("b.bin"))
+        let fullSize = allocatedSize(at: a.path)
+
+        ScanViewModel.refreshDirectory(node: dirNode)
+
+        let newDirNode = dirNode.children.first { $0.name == "newdir" }
+        XCTAssertNotNil(newDirNode)
+        XCTAssertEqual(newDirNode?.size, fullSize, "hardlinked pair inside a new directory must count once")
+    }
+
     func test_refresh_preserves_hardlink_dedup() throws {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)

@@ -102,6 +102,32 @@ final class FileScannerTests: XCTestCase {
         XCTAssertEqual(root?.children.first?.name, "real.txt")
     }
 
+    func test_scanner_sets_hardlink_refs() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let hard1 = tmp.appendingPathComponent("hard1.bin")
+        let hard2 = tmp.appendingPathComponent("hard2.bin")
+        try Data(repeating: 7, count: 262_144).write(to: hard1)
+        try FileManager.default.linkItem(at: hard1, to: hard2)
+        var st = stat()
+        XCTAssertEqual(lstat(hard1.path, &st), 0)
+        let fullSize = Int64(st.st_blocks) * 512
+
+        let scanner = FileScanner()
+        var root: FSNode?
+        for await progress in await scanner.scan(url: tmp) {
+            if case .completed(let node, _) = progress { root = node }
+        }
+
+        let n1 = root?.children.first { $0.name == "hard1.bin" }
+        let n2 = root?.children.first { $0.name == "hard2.bin" }
+        XCTAssertNotNil(n1?.hardLinkRef, "hardlinked file must carry its inode identity")
+        XCTAssertEqual(n1?.hardLinkRef, n2?.hardLinkRef, "both links to one inode share the same ref")
+        XCTAssertEqual(root?.size, fullSize, "hardlinked inode counted exactly once")
+    }
+
     func test_scanner_marks_unreadable_directory_as_denied() async throws {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)

@@ -272,14 +272,34 @@ public final class ScanViewModel: ObservableObject {
 
     // Returns the allocated disk size (st_blocks * 512) for a path via lstat, or nil if
     // the path can't be stat'd or is a symlink.
-    private nonisolated static func lstatInfo(path: String) -> (isDir: Bool, isSymlink: Bool, allocatedSize: Int64, linkCount: Int)? {
+    private nonisolated static func lstatInfo(path: String) -> (isDir: Bool, isSymlink: Bool, allocatedSize: Int64, linkCount: Int, ref: HardLinkRef)? {
         var st = stat()
         guard lstat(path, &st) == 0 else { return nil }
         let mode = st.st_mode & S_IFMT
         let isSymlink = mode == S_IFLNK
         let isDir = mode == S_IFDIR
         let allocatedSize = Int64(st.st_blocks) * 512
-        return (isDir, isSymlink, allocatedSize, Int(st.st_nlink))
+        let ref = HardLinkRef(dev: UInt64(bitPattern: Int64(st.st_dev)), ino: UInt64(st.st_ino))
+        return (isDir, isSymlink, allocatedSize, Int(st.st_nlink), ref)
+    }
+
+    // Climbs the parent chain to the tree's root node.
+    private nonisolated static func rootNode(of node: FSNode) -> FSNode {
+        var current = node
+        while let parent = current.parent { current = parent }
+        return current
+    }
+
+    // Iterative whole-tree search for a node representing the given inode.
+    // Only invoked when hardlinked entries (st_nlink > 1) appear or disappear,
+    // which is rare per refresh, so the O(tree) walk is acceptable.
+    private nonisolated static func firstNode(withRef ref: HardLinkRef, in root: FSNode, requireZeroSize: Bool = false) -> FSNode? {
+        var stack = [root]
+        while let n = stack.popLast() {
+            if n.hardLinkRef == ref, !requireZeroSize || n.size == 0 { return n }
+            stack.append(contentsOf: n.children)
+        }
+        return nil
     }
 
     // Parses the excludedFolderNames default the same way FileScanner does.
@@ -305,7 +325,7 @@ public final class ScanViewModel: ObservableObject {
 
         // Filter out excluded folder names and symlinks up front, so both the
         // removal pass and the add/update pass agree on what's "on disk".
-        var onDisk: [String: (url: URL, info: (isDir: Bool, isSymlink: Bool, allocatedSize: Int64, linkCount: Int))] = [:]
+        var onDisk: [String: (url: URL, info: (isDir: Bool, isSymlink: Bool, allocatedSize: Int64, linkCount: Int, ref: HardLinkRef))] = [:]
         for url in entries {
             let name = url.lastPathComponent
             if excludedNames.contains(name) { continue }
@@ -319,9 +339,26 @@ public final class ScanViewModel: ObservableObject {
         // Remove children that no longer exist on disk (or are now excluded/symlinks),
         // but never remove synthetic nodes (e.g. the "Hidden & Unreadable Space"
         // reconciliation entry), which never correspond to a real path.
+        let removedSizeCarriers = node.children.filter {
+            !$0.isSynthetic && !onDisk.keys.contains($0.name) && $0.hardLinkRef != nil && $0.size > 0
+        }
         let before = node.children.count
         node.children.removeAll { !$0.isSynthetic && !onDisk.keys.contains($0.name) }
         if node.children.count != before { changed = true }
+
+        // If a removed entry carried the representative size for a hardlinked inode
+        // that still exists via other links, promote a surviving 0-size link
+        // (anywhere in the tree) to carry the size, or the bytes vanish forever.
+        for removed in removedSizeCarriers {
+            guard let ref = removed.hardLinkRef else { continue }
+            let root = rootNode(of: node)
+            guard let survivor = firstNode(withRef: ref, in: root, requireZeroSize: true),
+                  let survivorInfo = lstatInfo(path: survivor.url.path), !survivorInfo.isDir
+            else { continue }
+            survivor.size = survivorInfo.allocatedSize
+            bubbleUpSizes(from: survivor.parent ?? survivor)
+            changed = true
+        }
 
         // Add or update children
         for (name, entry) in onDisk {
@@ -329,6 +366,7 @@ public final class ScanViewModel: ObservableObject {
             if let existing = node.children.first(where: { $0.name == name }) {
                 // Update size for files (directories update via recursive bubble)
                 if !existing.isDirectory {
+                    if info.linkCount > 1 && existing.hardLinkRef == nil { existing.hardLinkRef = info.ref }
                     // A 0-byte node for a multi-link inode is a hardlink the initial scan
                     // already counted elsewhere — re-statting it would double-count.
                     if info.linkCount > 1 && existing.size == 0 { continue }
@@ -340,13 +378,22 @@ public final class ScanViewModel: ObservableObject {
                 }
             } else if info.isDir {
                 // New directory — scan its whole subtree so it isn't left as a 0-byte leaf.
-                let child = scanSubtree(url: url, parent: node, showHiddenFiles: showHiddenFiles, excludedNames: excludedNames)
+                var seenRefs = Set<HardLinkRef>()
+                let child = scanSubtree(url: url, parent: node, showHiddenFiles: showHiddenFiles, excludedNames: excludedNames, treeRoot: rootNode(of: node), seenRefs: &seenRefs)
                 node.children.append(child)
                 changed = true
             } else {
-                // New file
+                // New file. A new name for an inode the tree already accounts for
+                // (a hardlink created after the scan) must contribute 0 bytes.
                 let ext = url.pathExtension.lowercased()
-                let child = FSNode(url: url, name: name, isDirectory: false, size: info.allocatedSize, fileExtension: ext, parent: node)
+                var size = info.allocatedSize
+                var linkRef: HardLinkRef?
+                if info.linkCount > 1 {
+                    linkRef = info.ref
+                    if firstNode(withRef: info.ref, in: rootNode(of: node)) != nil { size = 0 }
+                }
+                let child = FSNode(url: url, name: name, isDirectory: false, size: size, fileExtension: ext, parent: node)
+                child.hardLinkRef = linkRef
                 child.safetyLevel = SafetyAnalyzer.level(for: child)
                 node.children.append(child)
                 changed = true
@@ -366,7 +413,9 @@ public final class ScanViewModel: ObservableObject {
         url: URL,
         parent: FSNode?,
         showHiddenFiles: Bool,
-        excludedNames: Set<String>
+        excludedNames: Set<String>,
+        treeRoot: FSNode?,
+        seenRefs: inout Set<HardLinkRef>
     ) -> FSNode {
         let name = url.lastPathComponent
         guard let info = lstatInfo(path: url.path), info.isDir else {
@@ -395,10 +444,22 @@ public final class ScanViewModel: ObservableObject {
 
             let child: FSNode
             if childInfo.isDir {
-                child = scanSubtree(url: childURL, parent: node, showHiddenFiles: showHiddenFiles, excludedNames: excludedNames)
+                child = scanSubtree(url: childURL, parent: node, showHiddenFiles: showHiddenFiles, excludedNames: excludedNames, treeRoot: treeRoot, seenRefs: &seenRefs)
             } else {
                 let ext = childURL.pathExtension.lowercased()
-                child = FSNode(url: childURL, name: childName, isDirectory: false, size: childInfo.allocatedSize, fileExtension: ext, parent: node)
+                var size = childInfo.allocatedSize
+                var linkRef: HardLinkRef?
+                if childInfo.linkCount > 1 {
+                    linkRef = childInfo.ref
+                    if seenRefs.contains(childInfo.ref) {
+                        size = 0
+                    } else {
+                        seenRefs.insert(childInfo.ref)
+                        if let treeRoot, firstNode(withRef: childInfo.ref, in: treeRoot) != nil { size = 0 }
+                    }
+                }
+                child = FSNode(url: childURL, name: childName, isDirectory: false, size: size, fileExtension: ext, parent: node)
+                child.hardLinkRef = linkRef
                 child.safetyLevel = SafetyAnalyzer.level(for: child)
             }
             children.append(child)

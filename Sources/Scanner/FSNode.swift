@@ -1,5 +1,17 @@
 import Foundation
 
+// Identity of a hardlinked inode: lets the refresh path recognize that two
+// directory entries are the same underlying file, the way the scanner's
+// scan-time VisitedSet does.
+public struct HardLinkRef: Hashable, Sendable {
+    public let dev: UInt64
+    public let ino: UInt64
+    public init(dev: UInt64, ino: UInt64) {
+        self.dev = dev
+        self.ino = ino
+    }
+}
+
 public final class FSNode: Identifiable, @unchecked Sendable {
     public let id: UUID = UUID()
     public let url: URL
@@ -13,6 +25,8 @@ public final class FSNode: Identifiable, @unchecked Sendable {
     public var safetyLevel: SafetyLevel = .caution
     public var isAccessDenied: Bool = false
     public var isSynthetic: Bool = false
+    // Set only for files with st_nlink > 1 (both the size-carrying node and its 0-size siblings).
+    public var hardLinkRef: HardLinkRef?
 
     public init(url: URL, name: String, isDirectory: Bool, size: Int64, fileExtension: String, parent: FSNode? = nil) {
         self.url = url
