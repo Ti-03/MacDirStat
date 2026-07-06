@@ -131,6 +131,13 @@ private struct NodeRow: View {
                     .help(SafetyAnalyzer.reason(for: node) ?? "Do not delete")
             }
 
+            if node.isAccessDenied {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .help("Contents couldn't be read — Full Disk Access may be required")
+            }
+
             // Size
             Text(ByteFormatter.string(from: node.size))
                 .font(.system(size: 11, design: .monospaced))

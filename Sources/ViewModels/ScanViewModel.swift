@@ -20,6 +20,7 @@ public final class ScanViewModel: ObservableObject {
     @Published public var duplicateGroups: [[FSNode]] = []
     @Published public var hasFullDiskAccess: Bool = true
     @Published public var isWatching: Bool = false
+    @Published public var deniedCount: Int = 0
 
     public var treemapRoot: FSNode? { drillStack.last ?? root }
 
@@ -109,6 +110,7 @@ public final class ScanViewModel: ObservableObject {
         bytesFound = 0
         isComputingLayout = false
         errorMessage = nil
+        deniedCount = 0
 
         scanTask = Task {
             for await progress in await scanner.scan(url: url) {
@@ -116,15 +118,22 @@ public final class ScanViewModel: ObservableObject {
                 case .update(let items, let bytes):
                     self.itemsScanned = items
                     self.bytesFound = bytes
-                case .completed(let node):
+                case .completed(let node, let denied):
+                    self.isScanning = false
+                    self.deniedCount = denied
+                    // If the scanned root is a volume mount point, the file total will
+                    // always fall short of Finder's "used" figure (APFS snapshots,
+                    // purgeable space, excluded/unreadable folders). Make that gap
+                    // visible instead of silently under-reporting. Must run before the
+                    // sort pass below so the synthetic node sorts into place.
+                    Self.appendHiddenSpaceNodeIfNeeded(root: node, scannedURL: url)
                     if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
-                        var dump = "TREE_COMPLETED total=\(node.size)\n"
+                        var dump = "TREE_COMPLETED total=\(node.size) denied=\(denied)\n"
                         for c in node.children.sorted(by: { $0.size > $1.size }).prefix(15) {
-                            dump += "TREE_CHILD \(c.size) \(c.name)\n"
+                            dump += "TREE_CHILD \(c.size) \(c.name)\(c.isSynthetic ? " [synthetic]" : "")\n"
                         }
                         FileHandle.standardError.write(dump.data(using: .utf8)!)
                     }
-                    self.isScanning = false
                     self.isComputingLayout = true   // keep spinner until treemap is ready
                     // Sort + safety-tag the entire tree off-thread before exposing it to the UI.
                     await Task.detached(priority: .userInitiated) {
@@ -307,9 +316,11 @@ public final class ScanViewModel: ObservableObject {
 
         var changed = false
 
-        // Remove children that no longer exist (or are now excluded/symlinks)
+        // Remove children that no longer exist on disk (or are now excluded/symlinks),
+        // but never remove synthetic nodes (e.g. the "Hidden & Unreadable Space"
+        // reconciliation entry), which never correspond to a real path.
         let before = node.children.count
-        node.children.removeAll { !onDisk.keys.contains($0.name) }
+        node.children.removeAll { !$0.isSynthetic && !onDisk.keys.contains($0.name) }
         if node.children.count != before { changed = true }
 
         // Add or update children
@@ -398,6 +409,46 @@ public final class ScanViewModel: ObservableObject {
         node.children = children
         node.size = totalSize
         return node
+    }
+
+    // Computes the gap between what the volume reports as used (total - available)
+    // and what the scanner actually accounted for. On APFS volumes this gap is
+    // never zero: snapshots, purgeable space, and unreadable/excluded areas all
+    // count toward "used" without ever appearing as a scannable file. Returns nil
+    // when inputs are invalid or the gap is small enough to be measurement noise.
+    nonisolated static func hiddenSpaceBytes(volumeTotal: Int64, volumeAvailable: Int64, scannedTotal: Int64) -> Int64? {
+        guard volumeTotal > 0 else { return nil }
+        let hidden = max(0, volumeTotal - volumeAvailable - scannedTotal)
+        let oneGB: Int64 = 1_000_000_000
+        return hidden >= oneGB ? hidden : nil
+    }
+
+    // When the scanned URL is itself a volume's mount point, appends a synthetic
+    // "Hidden & Unreadable Space" child representing the portion of the volume's
+    // used space that the scanner could never account for. No-op for non-volume
+    // scans (e.g. scanning a subfolder) or when the gap is negligible.
+    private nonisolated static func appendHiddenSpaceNodeIfNeeded(root: FSNode, scannedURL: URL) {
+        guard let values = try? scannedURL.resourceValues(forKeys: [.volumeURLKey]),
+              let volumeURL = values.volume,
+              volumeURL.standardizedFileURL.path == scannedURL.standardizedFileURL.path
+        else { return }
+
+        guard let volumeValues = try? scannedURL.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey]),
+              let totalCapacity = volumeValues.volumeTotalCapacity,
+              let availableCapacity = volumeValues.volumeAvailableCapacity
+        else { return }
+
+        guard let hidden = hiddenSpaceBytes(
+            volumeTotal: Int64(totalCapacity),
+            volumeAvailable: Int64(availableCapacity),
+            scannedTotal: root.size
+        ) else { return }
+
+        let syntheticURL = scannedURL.appendingPathComponent("#hidden-space")
+        let synthetic = FSNode(url: syntheticURL, name: "Hidden & Unreadable Space", isDirectory: false, size: hidden, fileExtension: "", parent: root)
+        synthetic.isSynthetic = true
+        root.children.append(synthetic)
+        root.size += hidden
     }
 
     // Walk up the parent chain recalculating folder sizes from their children.

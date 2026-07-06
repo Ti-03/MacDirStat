@@ -74,7 +74,10 @@ public actor DuplicateDetector {
     private func collect(node: FSNode, into list: inout [FSNode]) {
         var stack: [FSNode] = [node]
         while let current = stack.popLast() {
-            if !current.isDirectory && current.size >= minSize && current.size <= maxSize {
+            // Synthetic nodes (e.g. the hidden-space reconciliation entry) have no
+            // real file behind their URL — hashing them would just fail harmlessly,
+            // but skip them outright rather than waste the attempt.
+            if !current.isSynthetic && !current.isDirectory && current.size >= minSize && current.size <= maxSize {
                 list.append(current)
             }
             stack.append(contentsOf: current.children)

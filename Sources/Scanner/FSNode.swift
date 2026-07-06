@@ -11,6 +11,8 @@ public final class FSNode: Identifiable, @unchecked Sendable {
     public let fileExtension: String
     public var duplicateGroupID: UUID?
     public var safetyLevel: SafetyLevel = .caution
+    public var isAccessDenied: Bool = false
+    public var isSynthetic: Bool = false
 
     public init(url: URL, name: String, isDirectory: Bool, size: Int64, fileExtension: String, parent: FSNode? = nil) {
         self.url = url

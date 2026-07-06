@@ -26,6 +26,7 @@ private final class ProgressCounter: @unchecked Sendable {
     private var lock = os_unfair_lock()
     private(set) var items: Int = 0
     private(set) var bytes: Int64 = 0
+    private(set) var denied: Int = 0
 
     func add(items: Int, bytes: Int64) {
         os_unfair_lock_lock(&lock)
@@ -34,9 +35,22 @@ private final class ProgressCounter: @unchecked Sendable {
         os_unfair_lock_unlock(&lock)
     }
 
+    func addDenied() {
+        os_unfair_lock_lock(&lock)
+        self.denied += 1
+        os_unfair_lock_unlock(&lock)
+    }
+
     var snapshot: (items: Int, bytes: Int64) {
         os_unfair_lock_lock(&lock)
         let result = (items, bytes)
+        os_unfair_lock_unlock(&lock)
+        return result
+    }
+
+    var deniedCount: Int {
+        os_unfair_lock_lock(&lock)
+        let result = denied
         os_unfair_lock_unlock(&lock)
         return result
     }
@@ -118,7 +132,7 @@ public actor FileScanner {
             do {
                 let root = try await _buildTree(path: url.path, url: url, parent: nil, rootDev: rootDev, counter: counter, visited: visited, config: config, taskBudget: taskBudget)
                 progressTask.cancel()
-                continuation.yield(.completed(root: root))
+                continuation.yield(.completed(root: root, deniedCount: counter.deniedCount))
             } catch is CancellationError {
                 progressTask.cancel()
             } catch {
@@ -176,6 +190,8 @@ private func _buildTree(
         // Accumulate direct file sizes immediately
         node.size = listing.totalSize
         node.children = listing.children
+        node.isAccessDenied = listing.accessDenied
+        if listing.accessDenied { counter.addDenied() }
 
         // Recurse into subdirectories, in parallel up to the task budget; beyond
         // that, recurse inline in the current task to bound total concurrency.
@@ -237,12 +253,18 @@ private struct DirectoryContents {
     var subdirPaths: [(String, URL)]  // subdirectory (path, url) pairs for parallel recursion
     var totalSize: Int64         // sum of immediate file sizes
     var itemCount: Int           // count of items processed here
+    var accessDenied: Bool = false  // true when opendir failed due to permissions (EACCES/EPERM)
 }
 
 private func _listDirectory(path: String, url: URL, rootDev: dev_t?, node: FSNode, counter: ProgressCounter, visited: VisitedSet, config: ScanConfig) -> DirectoryContents {
     var result = DirectoryContents(children: [], subdirPaths: [], totalSize: 0, itemCount: 0)
 
-    guard let dir = opendir(path) else { return result }
+    guard let dir = opendir(path) else {
+        if errno == EACCES || errno == EPERM {
+            result.accessDenied = true
+        }
+        return result
+    }
     defer { closedir(dir) }
     let directoryFD = dirfd(dir)
 

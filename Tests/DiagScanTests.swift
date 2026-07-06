@@ -20,7 +20,7 @@ final class DiagScanTests: XCTestCase {
             case .update(let items, let bytes):
                 lastItems = items
                 lastBytes = bytes
-            case .completed(let root):
+            case .completed(let root, _):
                 completedRoot = root
             case .failed(let msg):
                 XCTFail("scan failed: \(msg)")
