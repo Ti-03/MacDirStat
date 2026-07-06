@@ -117,6 +117,13 @@ public final class ScanViewModel: ObservableObject {
                     self.itemsScanned = items
                     self.bytesFound = bytes
                 case .completed(let node):
+                    if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
+                        var dump = "TREE_COMPLETED total=\(node.size)\n"
+                        for c in node.children.sorted(by: { $0.size > $1.size }).prefix(15) {
+                            dump += "TREE_CHILD \(c.size) \(c.name)\n"
+                        }
+                        FileHandle.standardError.write(dump.data(using: .utf8)!)
+                    }
                     self.isScanning = false
                     self.isComputingLayout = true   // keep spinner until treemap is ready
                     // Sort + safety-tag the entire tree off-thread before exposing it to the UI.
@@ -219,12 +226,17 @@ public final class ScanViewModel: ObservableObject {
         var needsLayout = false
         for dirPath in dirPaths {
             guard let node = Self.findNode(path: dirPath, in: root) else { continue }
+            let sizeBefore = node.size
             let changed = await Task.detached(priority: .userInitiated) {
                 Self.refreshDirectory(node: node)
             }.value
             if changed {
                 Self.bubbleUpSizes(from: node)
                 needsLayout = true
+            }
+            if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
+                let line = "REFRESH changed=\(changed) nodeBefore=\(sizeBefore) nodeAfter=\(node.size) rootAfter=\(root.size) path=\(dirPath)\n"
+                FileHandle.standardError.write(line.data(using: .utf8)!)
             }
         }
 

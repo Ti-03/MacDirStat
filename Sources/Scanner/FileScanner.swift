@@ -157,7 +157,12 @@ private func _buildTree(
     // Deduplicate directories by (dev, ino) — prevents double-counting paths like
     // /Applications and /System/Volumes/Data/Applications (same inode, different paths).
     if isDir {
-        guard visited.visit(dev: st.st_dev, ino: st.st_ino) else { throw SkipError() }
+        guard visited.visit(dev: st.st_dev, ino: st.st_ino) else {
+            if ProcessInfo.processInfo.environment["MDS_DEBUG_SKIPS"] != nil {
+                FileHandle.standardError.write("DEDUP_SKIP dev=\(st.st_dev) ino=\(st.st_ino) \(path)\n".data(using: .utf8)!)
+            }
+            throw SkipError()
+        }
     }
 
     let name = url.lastPathComponent
