@@ -190,8 +190,8 @@ struct ContentView: View {
     @ViewBuilder
     private var detailContent: some View {
         VStack(spacing: 0) {
-            if !vm.hasFullDiskAccess {
-                FullDiskAccessBanner()
+            if !vm.hasFullDiskAccess || (vm.deniedCount > 0 && !vm.isScanning) {
+                FullDiskAccessBanner(hasFullDiskAccess: vm.hasFullDiskAccess, deniedCount: vm.deniedCount)
             }
             if vm.root == nil && !vm.isScanning && !vm.isComputingLayout {
                 WelcomeView()
@@ -374,6 +374,19 @@ private struct FolderTitleView: View {
 // MARK: - Full Disk Access banner
 
 private struct FullDiskAccessBanner: View {
+    let hasFullDiskAccess: Bool
+    let deniedCount: Int
+
+    private let title = "Full Disk Access required for complete results"
+
+    private var subtitle: String {
+        if !hasFullDiskAccess {
+            return "Go to System Settings → Privacy & Security → Full Disk Access and add DirStat."
+        }
+        let folders = deniedCount == 1 ? "1 folder" : "\(deniedCount) folders"
+        return "\(folders) couldn't be read. Grant Full Disk Access for a complete scan."
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "lock.shield")
@@ -381,9 +394,9 @@ private struct FullDiskAccessBanner: View {
                 .foregroundStyle(.orange)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text("Full Disk Access required for complete results")
+                Text(title)
                     .font(.system(size: 12, weight: .semibold))
-                Text("Go to System Settings → Privacy & Security → Full Disk Access and add DirStat.")
+                Text(subtitle)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }

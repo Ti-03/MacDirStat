@@ -16,6 +16,10 @@ public struct SafetyAnalyzer {
     // MARK: - Bulk tagging (no string allocations — just enum assignment)
 
     public static func level(for node: FSNode) -> SafetyLevel {
+        // Synthetic nodes (e.g. the hidden-space reconciliation entry) don't point
+        // at a real, deletable file — always treat them as the most protective
+        // level so nothing ever attempts to trash/move them.
+        if node.isSynthetic { return .danger }
         let path = node.url.path
         let name = node.name
         if isDanger(path: path, name: name) { return .danger }
@@ -26,6 +30,9 @@ public struct SafetyAnalyzer {
     // MARK: - On-demand reason (called only when UI needs to display it)
 
     public static func reason(for node: FSNode) -> String? {
+        if node.isSynthetic {
+            return "Represents space macOS reports as used but the scanner can't read or enumerate (snapshots, purgeable space, protected folders)"
+        }
         let path = node.url.path
         let name = node.name
         return dangerReason(path: path, name: name)

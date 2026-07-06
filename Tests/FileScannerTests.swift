@@ -44,7 +44,7 @@ final class FileScannerTests: XCTestCase {
         let scanner = FileScanner()
         var root: FSNode?
         for await progress in await scanner.scan(url: tmp) {
-            if case .completed(let node) = progress { root = node }
+            if case .completed(let node, _) = progress { root = node }
         }
 
         XCTAssertNotNil(root)
@@ -67,7 +67,7 @@ final class FileScannerTests: XCTestCase {
         let scanner = FileScanner()
         var root: FSNode?
         for await progress in await scanner.scan(url: tmp) {
-            if case .completed(let node) = progress { root = node }
+            if case .completed(let node, _) = progress { root = node }
         }
 
         XCTAssertEqual(root?.size ?? 0, root?.children.first?.size ?? -1)
@@ -86,10 +86,39 @@ final class FileScannerTests: XCTestCase {
         let scanner = FileScanner()
         var root: FSNode?
         for await progress in await scanner.scan(url: tmp) {
-            if case .completed(let node) = progress { root = node }
+            if case .completed(let node, _) = progress { root = node }
         }
 
         XCTAssertEqual(root?.children.count, 1, "symlink should be skipped")
         XCTAssertEqual(root?.children.first?.name, "real.txt")
+    }
+
+    func test_scanner_marks_unreadable_directory_as_denied() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let locked = tmp.appendingPathComponent("locked")
+        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
+        try Data(repeating: 0, count: 4096).write(to: locked.appendingPathComponent("secret.bin"))
+
+        chmod(locked.path, 0)
+        defer {
+            chmod(locked.path, 0o755)
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        let scanner = FileScanner()
+        var root: FSNode?
+        var deniedCount = 0
+        for await progress in await scanner.scan(url: tmp) {
+            if case .completed(let node, let denied) = progress {
+                root = node
+                deniedCount = denied
+            }
+        }
+
+        let lockedNode = root?.children.first { $0.name == "locked" }
+        XCTAssertNotNil(lockedNode)
+        XCTAssertTrue(lockedNode?.isAccessDenied ?? false, "locked directory should be marked as access denied")
+        XCTAssertGreaterThanOrEqual(deniedCount, 1)
     }
 }
