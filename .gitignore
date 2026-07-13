@@ -28,6 +28,9 @@ DerivedData/
 # MkDocs build output (built by CI, not committed)
 /site/
 
+# Vale prose-lint styles are downloaded by `vale sync` (locally and in CI)
+.github/styles/
+
 # Amore / Sparkle private signing keys — NEVER commit these
 *.private
 sparkle_private_key

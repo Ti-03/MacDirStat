@@ -40,7 +40,7 @@ let arcAngle = fraction * totalAngle
 
 An arc smaller than `minArcAngle` (about 1 degree) is skipped entirely
 rather than drawn as an unreadable sliver. Folders recurse into their own
-children at the next radius band; files do not.
+children at the next radius band; files don't.
 
 ## `TreemapCell`
 
@@ -61,9 +61,9 @@ One cell per arc. `startAngle`/`endAngle` are in radians; `innerRadius`/
 
 ## Color assignment
 
-Colors are not assigned by `TreemapLayout` directly; it delegates to
+Colors aren't assigned by `TreemapLayout` directly; it delegates to
 `ExtensionColorMap.color(for:)` for files and computes a muted per-folder
 tint by hashing the folder's name for directories. Files also darken by a
 fixed amount per depth (from 0% at depth 0 up to 38% at depth 5+), so a
 `.mp4` five folders deep is visibly darker than one at the top level, even
-though both are "orange".
+though both are "orange."
