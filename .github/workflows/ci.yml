@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: build-and-test only reads the repo. Without this block
+# the job gets the default token, which can write contents.
+permissions:
+  contents: read
+
 jobs:
   build-test:
     name: Build & Test (${{ matrix.os }})
