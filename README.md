@@ -66,13 +66,12 @@ Requires macOS 14+ and Xcode 15+.
 Releases from `v1.2.0` on are signed with [Sigstore](https://www.sigstore.dev)
 cosign, keylessly, by the release workflow itself. The signature proves the
 artifact was built by this repo's `release.yml` at that tag and was not
-tampered with afterwards. To check, download the `.zip`, `.sig`, and `.pem`
-from the release and run:
+tampered with afterwards. To check, download the `.zip` and its
+`.cosign.bundle` from the release and run:
 
 ```bash
 cosign verify-blob \
-  --certificate MacDirStat-v1.2.0.zip.pem \
-  --signature MacDirStat-v1.2.0.zip.sig \
+  --bundle MacDirStat-v1.2.0.zip.cosign.bundle \
   --certificate-identity-regexp 'https://github.com/Ti-03/MacDirStat/\.github/workflows/release\.yml@refs/tags/v.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   MacDirStat-v1.2.0.zip
