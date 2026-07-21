@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# contents: write to create the GitHub release and upload assets.
+# id-token: write so cosign can request an OIDC token from GitHub and sign
+# keylessly: the signature is tied to THIS workflow at THIS tag, not to a
+# private key someone has to guard forever.
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build-sign-release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build release binary
+        run: swift build -c release
+
+      - name: Package artifact
+        run: |
+          BIN=$(swift build -c release --show-bin-path)
+          ditto -c -k --keepParent "$BIN/MacDirStat" "MacDirStat-${GITHUB_REF_NAME}.zip"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      # Keyless signing: cosign exchanges the job's OIDC token for a
+      # short-lived certificate from Fulcio and logs the signature in the
+      # Rekor transparency log. --yes acknowledges that upload.
+      - name: Sign artifact (Sigstore keyless)
+        run: |
+          cosign sign-blob --yes \
+            --output-signature "MacDirStat-${GITHUB_REF_NAME}.zip.sig" \
+            --output-certificate "MacDirStat-${GITHUB_REF_NAME}.zip.pem" \
+            "MacDirStat-${GITHUB_REF_NAME}.zip"
+
+      - name: Create GitHub release with signed artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "MacDirStat $GITHUB_REF_NAME" \
+            --generate-notes \
+            "MacDirStat-${GITHUB_REF_NAME}.zip" \
+            "MacDirStat-${GITHUB_REF_NAME}.zip.sig" \
+            "MacDirStat-${GITHUB_REF_NAME}.zip.pem"

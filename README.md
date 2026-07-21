@@ -61,6 +61,28 @@ swift run
 
 Requires macOS 14+ and Xcode 15+.
 
+### Verify a release
+
+Releases from `v1.2.0` on are signed with [Sigstore](https://www.sigstore.dev)
+cosign, keylessly, by the release workflow itself. The signature proves the
+artifact was built by this repo's `release.yml` at that tag and was not
+tampered with afterwards. To check, download the `.zip`, `.sig`, and `.pem`
+from the release and run:
+
+```bash
+cosign verify-blob \
+  --certificate MacDirStat-v1.2.0.zip.pem \
+  --signature MacDirStat-v1.2.0.zip.sig \
+  --certificate-identity-regexp 'https://github.com/Ti-03/MacDirStat/\.github/workflows/release\.yml@refs/tags/v.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  MacDirStat-v1.2.0.zip
+```
+
+`Verified OK` means the artifact matches the signature and the signing
+identity was this repo's release workflow. Every signature is also logged in
+the public [Rekor](https://docs.sigstore.dev/logging/overview/) transparency
+log.
+
 ## Tech
 
 Pure Swift + SwiftUI — no Electron, no web views, no dependencies.
