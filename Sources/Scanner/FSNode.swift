@@ -27,6 +27,13 @@ public final class FSNode: Identifiable, @unchecked Sendable {
     public var isSynthetic: Bool = false
     // Set only for files with st_nlink > 1 (both the size-carrying node and its 0-size siblings).
     public var hardLinkRef: HardLinkRef?
+    // True when the traversal collapsed this directory's entire subtree into
+    // this single node instead of materializing its descendants (see
+    // AtomicDirectorySummary.swift). `children` is always empty in that case.
+    public var isAutoSummarized: Bool = false
+    // Total number of files collapsed under this node by auto-summarization.
+    // 0 for normal (non-summarized) nodes.
+    public var descendantFileCount: Int = 0
 
     public init(url: URL, name: String, isDirectory: Bool, size: Int64, fileExtension: String, parent: FSNode? = nil) {
         self.url = url

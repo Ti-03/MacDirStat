@@ -5,7 +5,10 @@ import Foundation
 // Shared by both directory dedup (firmlinks/mount aliases) and hardlinked-file
 // dedup: a directory's inode and a file's inode never collide on one device,
 // so the two uses safely share one (dev, ino) namespace, exactly as before.
-private final class VisitedSet: @unchecked Sendable {
+// Shared with AtomicDirectorySummary.swift (same module) so the summarization
+// walk dedups directories/hardlinks against the exact same set as the main
+// traversal.
+final class VisitedSet: @unchecked Sendable {
     private var lock = os_unfair_lock()
     private var set = Set<DevIno>()
 
@@ -68,6 +71,10 @@ struct ScanConfig: Sendable {
     // bypassing getattrlistbulk entirely. Used by parity tests to compare the
     // two enumeration strategies against each other.
     let forceFallbackEnum: Bool
+    // Collapses tiny-file directories (node_modules, etc.) into one summarized
+    // leaf FSNode instead of materializing every descendant. See
+    // AtomicDirectorySummary.swift.
+    let autoSummarizeEnabled: Bool
 
     static func loadFromUserDefaults() -> ScanConfig {
         let rawExcluded = UserDefaults.standard.string(forKey: "excludedFolderNames")
@@ -75,7 +82,12 @@ struct ScanConfig: Sendable {
         let excludedNames = Set(rawExcluded.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
         let showHiddenFiles = UserDefaults.standard.bool(forKey: "showHiddenFiles")
         let forceFallbackEnum = ProcessInfo.processInfo.environment["MDS_FORCE_FALLBACK_ENUM"] == "1"
-        return ScanConfig(excludedNames: excludedNames, showHiddenFiles: showHiddenFiles, forceFallbackEnum: forceFallbackEnum)
+        // Default-true feature flag: absent key means "on" (unlike the other
+        // UserDefaults-backed flags above, which default to false/absent-Bool).
+        let autoSummarizeEnabled = UserDefaults.standard.object(forKey: "autoSummarizeEnabled") == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: "autoSummarizeEnabled")
+        return ScanConfig(excludedNames: excludedNames, showHiddenFiles: showHiddenFiles, forceFallbackEnum: forceFallbackEnum, autoSummarizeEnabled: autoSummarizeEnabled)
     }
 }
 
@@ -141,6 +153,9 @@ private struct DirWorkItem {
     // (TOCTOU) is detected and skipped rather than silently scanned wrong.
     let expectedDev: UInt64?
     let expectedIno: UInt64?
+    // Root is depth 0; each child work item is its parent's depth + 1. Used
+    // by the auto-summarization depth gate (see AtomicDirectorySummary.swift).
+    let depth: Int
 }
 
 // Bounded-concurrency work queue: a LIFO stack plus an in-flight counter.
@@ -224,7 +239,7 @@ private func _buildTree(
     _ = visited.visit(dev: rootDevKey, ino: rootInoKey)
 
     let rootNode = FSNode(url: rootURL, name: name, isDirectory: true, size: 0, fileExtension: "", parent: nil)
-    let seed = DirWorkItem(path: rootPath, url: rootURL, node: rootNode, expectedDev: rootDevKey, expectedIno: rootInoKey)
+    let seed = DirWorkItem(path: rootPath, url: rootURL, node: rootNode, expectedDev: rootDevKey, expectedIno: rootInoKey, depth: 0)
     let queue = WorkQueue(seed: seed)
 
     let workerCount = min(max(2, ProcessInfo.processInfo.activeProcessorCount / 2), 8)
@@ -307,6 +322,26 @@ private func _processDirectory(
         return
     }
 
+    if config.autoSummarizeEnabled,
+       shouldAutoSummarize(entries: entries, name: item.url.lastPathComponent, depth: item.depth) {
+        let summary = try summarizeSubtree(
+            rootEntries: entries,
+            rootPath: item.path,
+            rootDev: rootDevKey,
+            config: config,
+            visited: visited
+        ) { try Task.checkCancellation() }
+        item.node.isAutoSummarized = true
+        item.node.descendantFileCount = summary.fileCount
+        // Deep allocated total for the whole collapsed subtree.
+        // `aggregateDirectorySizes` only adds up directory *children*'s sizes,
+        // and this node's children are empty, so it will not be touched again.
+        item.node.size = summary.allocatedSize
+        item.node.children = []
+        counter.add(items: summary.fileCount + 1, bytes: summary.allocatedSize)
+        return
+    }
+
     var directSize: Int64 = 0
     var children: [FSNode] = []
     children.reserveCapacity(entries.count)
@@ -334,7 +369,7 @@ private func _processDirectory(
             let childNode = FSNode(url: childURL, name: entry.name, isDirectory: true, size: 0, fileExtension: "", parent: item.node)
             children.append(childNode)
             let childPath = item.path.hasSuffix("/") ? item.path + entry.name : item.path + "/" + entry.name
-            queue.push(DirWorkItem(path: childPath, url: childURL, node: childNode, expectedDev: entry.dev, expectedIno: entry.ino))
+            queue.push(DirWorkItem(path: childPath, url: childURL, node: childNode, expectedDev: entry.dev, expectedIno: entry.ino, depth: item.depth + 1))
 
         case .file:
             let childURL = item.url.appendingPathComponent(entry.name, isDirectory: false)
@@ -357,7 +392,8 @@ private func _processDirectory(
 // throws partway through (having already consumed some of `fd`'s kernel-side
 // listing position), the fallback re-opens the directory fresh by path so it
 // always sees the complete, unconsumed listing rather than a partial remainder.
-private func listDirectoryEntries(path: String, fd: Int32, forceFallback: Bool) throws -> [BulkDirEntry] {
+// Shared with AtomicDirectorySummary.swift (same module).
+func listDirectoryEntries(path: String, fd: Int32, forceFallback: Bool) throws -> [BulkDirEntry] {
     if forceFallback {
         return try fallbackEnumerateDirectory(fd: fd)
     }
@@ -421,7 +457,8 @@ private func allocatedSize(st: stat, visited: VisitedSet) -> Int64 {
 
 // Same dedup rule as `allocatedSize(st:visited:)` above, but sourced from a
 // `BulkDirEntry` (either enumeration path) instead of a raw `stat`.
-private func bulkAllocatedSize(entry: BulkDirEntry, visited: VisitedSet) -> Int64 {
+// Shared with AtomicDirectorySummary.swift (same module).
+func bulkAllocatedSize(entry: BulkDirEntry, visited: VisitedSet) -> Int64 {
     if entry.linkCount > 1 {
         guard visited.visit(dev: entry.dev, ino: entry.ino) else { return 0 }
     }

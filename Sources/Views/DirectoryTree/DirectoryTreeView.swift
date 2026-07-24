@@ -138,6 +138,15 @@ private struct NodeRow: View {
                     .help("Contents couldn't be read — Full Disk Access may be required")
             }
 
+            if node.isAutoSummarized {
+                Text("(\(node.descendantFileCount) files, summarized)")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.55) : Color.secondary.opacity(0.65))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .help("Collapsed to keep the scan fast: contents aren't browsable individually")
+            }
+
             // Size
             Text(ByteFormatter.string(from: node.size))
                 .font(.system(size: 11, design: .monospaced))
