@@ -475,4 +475,141 @@ final class IncrementalRefreshTests: XCTestCase {
         let afterRoot = FileNode(tree: afterTree, index: afterTree.rootIndex)
         XCTAssertEqual(splicedRoot.size, afterRoot.size, "splicing the directory holding the hardlink CARRIER must still match a full fresh rescan's total")
     }
+
+    // The mirror of the trash-path promotion bug, on the live-refresh path:
+    // an EXTERNAL process (Finder, rm, a build tool) deletes the link that
+    // happened to be the size carrier, while the inode stays alive through a
+    // twin in an untouched sibling directory. FSEvents reports only the
+    // carrier's directory, so only that subtree is rescanned — and nothing
+    // promotes the surviving twin, so the still-allocated bytes silently
+    // vanish from the total.
+    //
+    // The bar is the same one the other splice tests use: the spliced tree
+    // must agree with a full fresh rescan of the same on-disk state.
+    func test_splice_after_external_deletion_of_carrier_promotes_surviving_twin() async throws {
+        let (tmp, ref) = try makeHardlinkAcrossDirsFixture()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let before = await scanAndWait(tmp)
+        guard let beforeTree = await before.tree else { return XCTFail("initial scan should populate a tree") }
+        guard let carrierDirName = topLevelDirName(carryingRef: true, ref: ref, tree: beforeTree) else {
+            return XCTFail("expected to find the hardlink's size carrier in the initial scan")
+        }
+
+        // Delete only the carrier's link. The inode's blocks are still fully
+        // allocated, reachable via the twin in the other directory.
+        let carrierDir = tmp.appendingPathComponent(carrierDirName)
+        let carrierLink = try FileManager.default
+            .contentsOfDirectory(at: carrierDir, includingPropertiesForKeys: nil)
+            .first { url in
+                var st = stat()
+                guard lstat(url.path, &st) == 0 else { return false }
+                return HardLinkRef(dev: UInt64(bitPattern: Int64(st.st_dev)), ino: UInt64(st.st_ino)) == ref
+            }
+        guard let carrierLink else { return XCTFail("could not locate the carrier link on disk") }
+        try FileManager.default.removeItem(at: carrierLink)
+
+        guard let spliced = ScanViewModel.splicedTree(afterChangeAt: carrierDir.path, in: beforeTree) else {
+            return XCTFail("splice should succeed for a plain, non-summarized subdirectory")
+        }
+
+        let after = await scanAndWait(tmp)
+        guard let afterTree = await after.tree else { return XCTFail("rescan should populate a tree") }
+
+        let splicedRoot = FileNode(tree: spliced, index: spliced.rootIndex)
+        let afterRoot = FileNode(tree: afterTree, index: afterTree.rootIndex)
+        XCTAssertEqual(
+            splicedRoot.size,
+            afterRoot.size,
+            "deleting a hardlink's size carrier must promote the surviving twin, not drop the inode's bytes"
+        )
+    }
+
+    // Two entirely independent hardlink pairs, each split across its own two
+    // sibling directories, with BOTH carriers deleted externally out of the
+    // SAME directory in one splice — each orphaned ref must promote its own
+    // twin; nothing should get mixed up or dropped between the two.
+    //
+    // Both pairs' first halves live in "dirX", both second halves in "dirY",
+    // so whichever of the two directories the scanner happens to visit first
+    // ends up carrying BOTH pairs' sizes (first-seen-wins is decided at the
+    // whole-directory level here, since each pair's two links are never in
+    // the same directory as each other). The test discovers that carrier
+    // directory rather than assuming which one it is, so it isn't coupled to
+    // `FileManager.contentsOfDirectory`'s (unspecified) enumeration order.
+    func test_splice_after_external_deletion_of_two_carriers_in_same_directory_promotes_both_twins() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let dirX = tmp.appendingPathComponent("dirX")
+        let dirY = tmp.appendingPathComponent("dirY")
+        try FileManager.default.createDirectory(at: dirX, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dirY, withIntermediateDirectories: true)
+
+        // Pair 1: dirX/firstBig.bin <-> dirY/firstLink.bin
+        let firstBigPath = dirX.appendingPathComponent("firstBig.bin")
+        try Data(repeating: 9, count: 262_144).write(to: firstBigPath)
+        try FileManager.default.linkItem(at: firstBigPath, to: dirY.appendingPathComponent("firstLink.bin"))
+        var firstSt = stat()
+        XCTAssertEqual(lstat(firstBigPath.path, &firstSt), 0)
+        let firstRef = HardLinkRef(dev: UInt64(bitPattern: Int64(firstSt.st_dev)), ino: UInt64(firstSt.st_ino))
+
+        // Pair 2: dirX/secondBig.bin <-> dirY/secondLink.bin — a completely
+        // independent inode, unrelated to pair 1.
+        let secondBigPath = dirX.appendingPathComponent("secondBig.bin")
+        try Data(repeating: 3, count: 131_072).write(to: secondBigPath)
+        try FileManager.default.linkItem(at: secondBigPath, to: dirY.appendingPathComponent("secondLink.bin"))
+        var secondSt = stat()
+        XCTAssertEqual(lstat(secondBigPath.path, &secondSt), 0)
+        let secondRef = HardLinkRef(dev: UInt64(bitPattern: Int64(secondSt.st_dev)), ino: UInt64(secondSt.st_ino))
+
+        let before = await scanAndWait(tmp)
+        guard let beforeTree = await before.tree else { return XCTFail("initial scan should populate a tree") }
+        guard let firstCarrierDirName = topLevelDirName(carryingRef: true, ref: firstRef, tree: beforeTree),
+              let secondCarrierDirName = topLevelDirName(carryingRef: true, ref: secondRef, tree: beforeTree),
+              firstCarrierDirName == secondCarrierDirName
+        else { return XCTFail("expected both pairs to share the same first-seen-wins carrier directory") }
+        let carrierDirName = firstCarrierDirName
+        let twinDirName = carrierDirName == "dirX" ? "dirY" : "dirX"
+        let carrierDir = tmp.appendingPathComponent(carrierDirName)
+
+        // Delete BOTH carrier links out of the shared carrier directory.
+        // Both inodes are still fully allocated via their respective twins
+        // in the other directory.
+        for url in try FileManager.default.contentsOfDirectory(at: carrierDir, includingPropertiesForKeys: nil) {
+            var st = stat()
+            guard lstat(url.path, &st) == 0 else { continue }
+            let ref = HardLinkRef(dev: UInt64(bitPattern: Int64(st.st_dev)), ino: UInt64(st.st_ino))
+            if ref == firstRef || ref == secondRef {
+                try FileManager.default.removeItem(at: url)
+            }
+        }
+
+        guard let spliced = ScanViewModel.splicedTree(afterChangeAt: carrierDir.path, in: beforeTree) else {
+            return XCTFail("splice should succeed for a plain, non-summarized subdirectory")
+        }
+
+        let after = await scanAndWait(tmp)
+        guard let afterTree = await after.tree else { return XCTFail("rescan should populate a tree") }
+
+        let splicedRoot = FileNode(tree: spliced, index: spliced.rootIndex)
+        let afterRoot = FileNode(tree: afterTree, index: afterTree.rootIndex)
+        XCTAssertEqual(
+            splicedRoot.size,
+            afterRoot.size,
+            "deleting two independent hardlinks' size carriers from the same directory must promote both surviving twins"
+        )
+
+        // Confirm both promotions actually happened (not just a total that
+        // happens to match by coincidence): the untouched sibling directory's
+        // two remaining links must now each carry their own pair's full size.
+        guard let splicedTwinDir = splicedRoot.children.first(where: { $0.name == twinDirName }) else {
+            return XCTFail("the twin directory must survive the splice untouched (it wasn't the spliced one)")
+        }
+        let firstTwin = splicedTwinDir.children.first { $0.hardLinkRef == firstRef }
+        let secondTwin = splicedTwinDir.children.first { $0.hardLinkRef == secondRef }
+        XCTAssertEqual(firstTwin?.size, 262_144, "the first pair's surviving twin must be promoted to its own pair's full size")
+        XCTAssertEqual(secondTwin?.size, 131_072, "the second pair's surviving twin must be promoted to its own pair's full size, independently of the first pair")
+    }
 }

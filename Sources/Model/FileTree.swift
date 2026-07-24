@@ -466,4 +466,65 @@ public final class FileTree: @unchecked Sendable {
             rootPath: rootPath
         )
     }
+
+    // MARK: - Splice-time hardlink survivor promotion (FIX 1, refresh-side twin of removingSubtrees' promotion)
+
+    // The live-refresh counterpart to `removingSubtrees`' hardlink survivor
+    // promotion above, but simpler: it doesn't need to find the orphaned
+    // ref/size pairs itself (the caller — `ScanViewModel.splicedTree` —
+    // already worked out which `hardLinkRef`s the OLD (stale) subtree
+    // carried but the freshly-rescanned NEW subtree doesn't, by diffing the
+    // two subtrees' own carried-ref sets), it just needs to do the
+    // promotion: find a surviving zero-size twin for `ref` ANYWHERE in this
+    // tree (the search doesn't need to exclude the freshly-spliced subtree —
+    // if that subtree happens to itself contain the zero-size twin, that's
+    // still a perfectly valid — arguably the most natural — promotion
+    // target), set it to `size`, and bubble that size up its ancestor chain,
+    // re-sorting every span the jump from 0 to `size` could have disturbed —
+    // same reasoning as `removingSubtrees`' own promotion resort above.
+    //
+    // Returns `self` unchanged if no zero-size twin for `ref` exists
+    // anywhere — defensive; the caller only ever calls this for a ref it
+    // already knows was carried by the subtree it just replaced, but a
+    // missing survivor (every link to the inode is now gone) is not an
+    // error, just nothing to promote.
+    public func promotingSurvivingTwin(ref: HardLinkRef, size: Int64) -> FileTree {
+        guard let twinIndex = records.firstIndex(where: { $0.hardLinkRef == ref && $0.size == 0 }) else {
+            return self
+        }
+
+        var newRecords = records
+        newRecords[twinIndex].size = size
+
+        // The twin's own parent span (one member jumped from 0 to `size`)
+        // and every ancestor above it up to root (same members, but one now
+        // has a different size).
+        var resortTargets: [Int] = []
+        var ancestor = parentIndex[twinIndex]
+        while ancestor >= 0 {
+            newRecords[ancestor].size += size
+            resortTargets.append(ancestor)
+            ancestor = parentIndex[ancestor]
+        }
+
+        var newChildIndices = childIndices
+        for newIdx in resortTargets {
+            let start = childStart[newIdx]
+            let cnt = childCount[newIdx]
+            guard cnt > 1 else { continue }
+            var slice = Array(newChildIndices[start..<(start + cnt)])
+            slice.sort { newRecords[$0].size > newRecords[$1].size }
+            newChildIndices.replaceSubrange(start..<(start + cnt), with: slice)
+        }
+
+        return FileTree(
+            records: newRecords,
+            parentIndex: parentIndex,
+            childStart: childStart,
+            childCount: childCount,
+            childIndices: newChildIndices,
+            rootIndex: rootIndex,
+            rootPath: rootPath
+        )
+    }
 }

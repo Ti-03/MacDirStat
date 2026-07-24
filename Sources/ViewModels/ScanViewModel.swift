@@ -422,6 +422,21 @@ public final class ScanViewModel: ObservableObject {
         // inode's bytes would vanish from the tree entirely (both copies at
         // 0) instead of correctly moving to whichever copy is now first-seen.
         var seenRefs = Self.hardLinkRefsOutsideSubtree(rootedAt: index, in: tree)
+
+        // FIX 1 setup: capture which `hardLinkRef`s the OLD (stale) subtree
+        // itself carried (size > 0), against the ORIGINAL tree, before it's
+        // replaced below. This is the only place that information survives —
+        // once `replacingSubtree` swaps the stale nodes out, there's no way
+        // to tell "this ref isn't carried by the new subtree" apart from
+        // "this ref was never carried by anything in this subtree at all".
+        // See the comment at the promotion call site below for why this
+        // matters: an external deletion (Finder/`rm`/a build tool — NOT this
+        // app's own Trash action, which `FileTree.removingSubtrees` already
+        // covers) of the carrier link inside this subtree leaves the inode
+        // still fully allocated via a twin elsewhere, and nothing else in
+        // this function would ever notice.
+        let oldCarriedRefs = Self.carriedHardLinkRefs(insideSubtreeRootedAt: index, in: tree)
+
         let freshNode = scanSubtree(
             url: node.url,
             parent: nil,
@@ -434,7 +449,54 @@ public final class ScanViewModel: ObservableObject {
         guard freshNode.name != "node_modules", !containsUnsummarizedGeneratedDirectory(freshNode) else { return nil }
 
         let subtree = FileTreeBuilder.build(from: freshNode, rootPath: node.url.path)
-        return tree.replacingSubtree(at: index, with: subtree)
+        var result = tree.replacingSubtree(at: index, with: subtree)
+
+        // FIX 1: promote a surviving twin for every ref the OLD subtree
+        // carried but the freshly-rescanned NEW subtree does not — the
+        // on-disk link that carried the inode's bytes vanished for a reason
+        // this splice can't otherwise account for (an external delete, not
+        // this app's own Trash action). Without this, the bytes would simply
+        // drop out of the tree until the next full rescan, even though the
+        // inode is still fully allocated via a twin outside this subtree (or
+        // even inside it — see `promotingSurvivingTwin`'s doc comment for why
+        // a plain whole-tree search for the twin is correct either way).
+        // Multiple independent orphaned refs (two unrelated hardlink pairs
+        // both losing their carrier in the same splice) each promote their
+        // own twin, one call per ref.
+        if !oldCarriedRefs.isEmpty {
+            var newCarriedRefs = Set<HardLinkRef>()
+            for record in subtree.records where record.hardLinkRef != nil && record.size > 0 {
+                newCarriedRefs.insert(record.hardLinkRef!)
+            }
+            for (ref, size) in oldCarriedRefs where !newCarriedRefs.contains(ref) {
+                result = result.promotingSurvivingTwin(ref: ref, size: size)
+            }
+        }
+
+        return result
+    }
+
+    // FIX 1 support for `splicedTree`: collects `hardLinkRef -> size` for
+    // every node INSIDE the subtree rooted at `subtreeRootIndex` that is
+    // itself the size carrier (`size > 0`) for its ref — the set of refs an
+    // external deletion inside this subtree could orphan. Mirrors
+    // `hardLinkRefsOutsideSubtree`'s traversal but walks IN rather than
+    // computing the complement, and needs the size (not just the ref) so the
+    // caller can promote a survivor to the exact right amount.
+    private nonisolated static func carriedHardLinkRefs(insideSubtreeRootedAt subtreeRootIndex: Int, in tree: FileTree) -> [HardLinkRef: Int64] {
+        var result: [HardLinkRef: Int64] = [:]
+        var stack = [subtreeRootIndex]
+        while let i = stack.popLast() {
+            if let ref = tree.records[i].hardLinkRef, tree.records[i].size > 0 {
+                result[ref] = tree.records[i].size
+            }
+            let start = tree.childStart[i]
+            let cnt = tree.childCount[i]
+            for offset in 0..<cnt {
+                stack.append(tree.childIndices[start + offset])
+            }
+        }
+        return result
     }
 
     // BUG 2 fix support for `splicedTree`: marks every node inside the
