@@ -3,7 +3,7 @@ import Foundation
 // Identity of a hardlinked inode: lets the refresh path recognize that two
 // directory entries are the same underlying file, the way the scanner's
 // scan-time VisitedSet does.
-public struct HardLinkRef: Hashable, Sendable {
+public struct HardLinkRef: Hashable, Sendable, Codable {
     public let dev: UInt64
     public let ino: UInt64
     public init(dev: UInt64, ino: UInt64) {

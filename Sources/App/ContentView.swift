@@ -193,6 +193,9 @@ struct ContentView: View {
     @ViewBuilder
     private var detailContent: some View {
         VStack(spacing: 0) {
+            if vm.isReadOnlySnapshot {
+                SnapshotBanner(date: vm.snapshotDate)
+            }
             if !vm.hasFullDiskAccess || (vm.deniedCount > 0 && !vm.isScanning) {
                 FullDiskAccessBanner(hasFullDiskAccess: vm.hasFullDiskAccess, deniedCount: vm.deniedCount) {
                     vm.showFDASheet = true
@@ -418,6 +421,46 @@ private struct FullDiskAccessBanner: View {
         .padding(.vertical, 9)
         .background(.orange.opacity(0.15))
         .overlay(alignment: .bottom) { Divider().overlay(.orange.opacity(0.3)) }
+    }
+}
+
+// MARK: - Read-only snapshot banner
+
+// Shown whenever `vm.tree` was loaded from a `.mdscan` archive instead of a
+// live scan. Trash/delete actions are already disabled at the ScanViewModel
+// level (`trashNodes` no-ops while `isReadOnlySnapshot` is set); this is
+// just the visible explanation of why.
+private struct SnapshotBanner: View {
+    let date: Date?
+
+    private var subtitle: String {
+        guard let date else { return "Opened from a saved scan. Delete actions are disabled." }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return "Saved \(formatter.string(from: date)). Delete actions are disabled."
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "camera.aperture")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.blue)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Read-only snapshot")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(.blue.opacity(0.15))
+        .overlay(alignment: .bottom) { Divider().overlay(.blue.opacity(0.3)) }
     }
 }
 

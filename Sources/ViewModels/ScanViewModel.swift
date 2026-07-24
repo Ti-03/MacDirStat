@@ -25,6 +25,11 @@ public final class ScanViewModel: ObservableObject {
     @Published public var isWatching: Bool = false
     @Published public var deniedCount: Int = 0
     @Published public var showFDASheet: Bool = false
+    // Set when `tree` was loaded from a `.mdscan` archive instead of a live
+    // scan: disables trash/delete actions and live FSEvents watching, and
+    // drives the read-only banner in ContentView.
+    @Published public var isReadOnlySnapshot: Bool = false
+    @Published public var snapshotDate: Date?
 
     public var root: FileNode? { tree.map { FileNode(tree: $0, index: $0.rootIndex) } }
     public var treemapRoot: FileNode? { drillStack.last ?? root }
@@ -154,6 +159,8 @@ public final class ScanViewModel: ObservableObject {
         layoutGeneration += 1       // invalidate any in-progress layout
         scanURL = url
         UserDefaults.standard.set(url.path, forKey: "lastScannedPath")
+        isReadOnlySnapshot = false
+        snapshotDate = nil
         tree = nil
         cells = []
         colorMap = nil
@@ -643,9 +650,15 @@ public final class ScanViewModel: ObservableObject {
     // Moves several nodes to the Trash (the "keep 1, delete N" / "Delete All
     // Duplicates" case) and prunes every successfully-trashed one out of the
     // tree in a single splice, rather than rescanning once per node.
+    //
+    // An opened `.mdscan` archive is a read-only snapshot of a scan that may
+    // no longer match what's on disk — trashing from it would either delete
+    // the wrong (current, possibly since-changed) file or silently no-op,
+    // neither of which is acceptable, so this is a hard no-op while a
+    // snapshot is loaded.
     @discardableResult
     public func trashNodes(_ nodes: [FileNode]) -> Bool {
-        guard let currentTree = tree, !nodes.isEmpty else { return false }
+        guard !isReadOnlySnapshot, let currentTree = tree, !nodes.isEmpty else { return false }
 
         var trashedIndices: [Int] = []
         trashedIndices.reserveCapacity(nodes.count)
@@ -813,6 +826,107 @@ public final class ScanViewModel: ObservableObject {
             let node = FileNode(tree: tree, index: index)
             tree.setSafety(SafetyAnalyzer.level(for: node), at: index)
         }
+    }
+
+    // MARK: - Save / reopen scans (.mdscan archive)
+
+    // Encodes the current tree + a small metadata block and writes it to
+    // `url` off the main actor (encoding a multi-million-record tree to
+    // JSON is real work). Errors surface through `errorMessage`, same as
+    // `exportCSV`.
+    public func saveScan(to url: URL) {
+        guard let tree else { return }
+        let metadata = ScanArchive.Metadata(
+            scannedPath: tree.rootPath,
+            scanDate: Date(),
+            deniedCount: deniedCount,
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+        )
+        let archive = ScanArchive(tree: tree, metadata: metadata)
+
+        Task.detached(priority: .utility) { [weak self] in
+            do {
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                let data = try encoder.encode(archive)
+                try data.write(to: url, options: .atomic)
+            } catch {
+                await MainActor.run { self?.errorMessage = "Couldn't save scan: \(error.localizedDescription)" }
+            }
+        }
+    }
+
+    // Decodes and validates a `.mdscan` archive off the main actor, then
+    // installs it as a read-only snapshot. A malformed or doctored archive
+    // surfaces as `errorMessage` rather than crashing or hanging — see
+    // `ScanArchive.validate()`.
+    public func openArchive(from url: URL) {
+        scanTask?.cancel()
+        extensionTask?.cancel()
+        duplicateTask?.cancel()
+        watchTask?.cancel()
+        fileWatcher.stop()
+        isWatching = false
+        layoutGeneration += 1
+        securityScopedURL?.stopAccessingSecurityScopedResource()
+        securityScopedURL = nil
+        errorMessage = nil
+        isScanning = true
+        isComputingLayout = false
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let data = try Data(contentsOf: url)
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                let archive = try decoder.decode(ScanArchive.self, from: data)
+                try archive.validate()
+                let tree = archive.makeTree()
+                await MainActor.run { self?.applyOpenedArchive(tree: tree, metadata: archive.metadata) }
+            } catch {
+                await MainActor.run {
+                    self?.isScanning = false
+                    self?.errorMessage = "Couldn't open scan: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    // Installs a validated, freshly-decoded tree as the active read-only
+    // snapshot: no live watching is started (this never calls `scan(url:)`
+    // or `startWatching`), and `isReadOnlySnapshot` gates trash actions off
+    // for the rest of this tree's lifetime.
+    private func applyOpenedArchive(tree: FileTree, metadata: ScanArchive.Metadata) {
+        isScanning = false
+        isReadOnlySnapshot = true
+        snapshotDate = metadata.scanDate
+        scanURL = URL(fileURLWithPath: metadata.scannedPath)
+        deniedCount = metadata.deniedCount
+        selectedNode = nil
+        drillStack = []
+        highlightedExtension = nil
+        errorMessage = nil
+        UserDefaults.standard.set(metadata.scannedPath, forKey: "lastScannedPath")
+
+        self.tree = tree
+        let rootNode = FileNode(tree: tree, index: tree.rootIndex)
+        let map = ExtensionColorMap(root: rootNode)
+        colorMap = map
+        isComputingLayout = true
+        Task { await recomputeLayout() }
+
+        // Safety tags and duplicateGroupIDs were already computed before the
+        // original scan was saved and travel with the archived records, so
+        // only the two aggregate derived views need to be rebuilt.
+        extensionTask?.cancel()
+        extensionTask = Task.detached(priority: .userInitiated) { [tree, map, weak self] in
+            let summaries = Self.buildExtensionSummaries(tree: tree, map: map)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self?.extensionSummaries = summaries }
+        }
+
+        duplicateGroups = Self.buildDuplicateGroups(tree: tree)
+        duplicatesReady = true
     }
 
     public func exportCSV() {

@@ -1,6 +1,6 @@
 import Foundation
 
-public enum SafetyLevel: Equatable, Sendable {
+public enum SafetyLevel: Equatable, Sendable, Codable {
     case safe     // Regeneratable artifact — confident it's okay to delete
     case caution  // Unknown or user data — review before deleting
     case danger   // System or critical app data — do not delete

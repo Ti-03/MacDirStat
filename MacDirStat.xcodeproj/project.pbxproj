@@ -40,6 +40,7 @@
 		A498AC088B1E3C6E1B255BC2 /* FileNode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9429B8A593856D8B12941F49 /* FileNode.swift */; };
 		26B861D7144BFB6B2FD00F6B /* FileNodeRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = F03CE9327807EE8357D3678B /* FileNodeRecord.swift */; };
 		E7ED11C27A082009974B4706 /* FileTreeBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FB7871D4D4A1E73B7984396 /* FileTreeBuilder.swift */; };
+		A7CECAA54EC4419CA4B847D2 /* ScanArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B0C663AD1A1417DA8FC6942 /* ScanArchive.swift */; };
 		SPARK003000000000000003AA /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = SPARK002000000000000002AA /* Sparkle */; };
 /* End PBXBuildFile section */
 
@@ -80,6 +81,7 @@
 		9429B8A593856D8B12941F49 /* FileNode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileNode.swift; sourceTree = "<group>"; };
 		F03CE9327807EE8357D3678B /* FileNodeRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileNodeRecord.swift; sourceTree = "<group>"; };
 		4FB7871D4D4A1E73B7984396 /* FileTreeBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTreeBuilder.swift; sourceTree = "<group>"; };
+		5B0C663AD1A1417DA8FC6942 /* ScanArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanArchive.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -157,6 +159,7 @@
 				9429B8A593856D8B12941F49 /* FileNode.swift */,
 				F03CE9327807EE8357D3678B /* FileNodeRecord.swift */,
 				4FB7871D4D4A1E73B7984396 /* FileTreeBuilder.swift */,
+				5B0C663AD1A1417DA8FC6942 /* ScanArchive.swift */,
 			);
 			path = Model;
 			sourceTree = "<group>";
@@ -379,6 +382,7 @@
 				A498AC088B1E3C6E1B255BC2 /* FileNode.swift in Sources */,
 				26B861D7144BFB6B2FD00F6B /* FileNodeRecord.swift in Sources */,
 				E7ED11C27A082009974B4706 /* FileTreeBuilder.swift in Sources */,
+				A7CECAA54EC4419CA4B847D2 /* ScanArchive.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

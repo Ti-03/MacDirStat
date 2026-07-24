@@ -6,7 +6,7 @@ import Foundation
 // huge scans) — the absolute path is reconstructed on demand from names +
 // parentIndex (see `FileTree.path(of:)` / `FileNode.url`), and node identity
 // for SwiftUI purposes is the (tree, index) pair (see `FileNode.id`).
-public struct FileNodeRecord: Sendable {
+public struct FileNodeRecord: Sendable, Codable {
     public let name: String
     public let isDirectory: Bool
     public var size: Int64

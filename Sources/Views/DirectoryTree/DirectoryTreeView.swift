@@ -40,11 +40,13 @@ struct DirectoryTreeView: View {
                                     Label("Open in Chart", systemImage: "arrow.down.right.circle")
                                 }
                             }
-                            Divider()
-                            Button(role: .destructive) {
-                                vm.trashNode(node)
-                            } label: {
-                                Label("Move to Trash", systemImage: "trash")
+                            if !vm.isReadOnlySnapshot {
+                                Divider()
+                                Button(role: .destructive) {
+                                    vm.trashNode(node)
+                                } label: {
+                                    Label("Move to Trash", systemImage: "trash")
+                                }
                             }
                         }
                 }

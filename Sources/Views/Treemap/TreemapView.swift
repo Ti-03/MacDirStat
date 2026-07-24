@@ -202,12 +202,14 @@ struct TreemapView: View {
                 }
             }
 
-            Divider()
+            if !vm.isReadOnlySnapshot {
+                Divider()
 
-            Button(role: .destructive) {
-                vm.trashNode(node)
-            } label: {
-                Label("Move to Trash", systemImage: "trash")
+                Button(role: .destructive) {
+                    vm.trashNode(node)
+                } label: {
+                    Label("Move to Trash", systemImage: "trash")
+                }
             }
         }
     }
