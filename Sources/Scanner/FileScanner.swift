@@ -2,17 +2,20 @@ import Foundation
 
 // Thread-safe set tracking visited (dev, ino) pairs to prevent double-counting.
 // On macOS, /System/Volumes/Data/Applications shares the same inode as /Applications, etc.
+// Shared by both directory dedup (firmlinks/mount aliases) and hardlinked-file
+// dedup: a directory's inode and a file's inode never collide on one device,
+// so the two uses safely share one (dev, ino) namespace, exactly as before.
 private final class VisitedSet: @unchecked Sendable {
     private var lock = os_unfair_lock()
     private var set = Set<DevIno>()
 
     private struct DevIno: Hashable {
-        let dev: dev_t
-        let ino: ino_t
+        let dev: UInt64
+        let ino: UInt64
     }
 
     // Returns true if this (dev, ino) was NOT previously seen (and marks it seen).
-    func visit(dev: dev_t, ino: ino_t) -> Bool {
+    func visit(dev: UInt64, ino: UInt64) -> Bool {
         let key = DevIno(dev: dev, ino: ino)
         os_unfair_lock_lock(&lock)
         let inserted = set.insert(key).inserted
@@ -56,45 +59,23 @@ private final class ProgressCounter: @unchecked Sendable {
     }
 }
 
-// Thread-safe counter bounding the number of concurrently-spawned subtree tasks.
-// Prevents unbounded task-group fan-out (and the associated flood of open dirfds)
-// on very deep/wide directory trees.
-private final class TaskBudget: @unchecked Sendable {
-    private var lock = os_unfair_lock()
-    private var remaining: Int
-
-    init(limit: Int) {
-        self.remaining = limit
-    }
-
-    // Returns true if a slot was reserved (caller must call release() when done).
-    func tryAcquire() -> Bool {
-        os_unfair_lock_lock(&lock)
-        defer { os_unfair_lock_unlock(&lock) }
-        guard remaining > 0 else { return false }
-        remaining -= 1
-        return true
-    }
-
-    func release() {
-        os_unfair_lock_lock(&lock)
-        remaining += 1
-        os_unfair_lock_unlock(&lock)
-    }
-}
-
 // Snapshot of scan-time settings, read once per scan (not per directory) to avoid
-// UserDefaults overhead on the hot path.
+// UserDefaults / environment overhead on the hot path.
 struct ScanConfig: Sendable {
     let excludedNames: Set<String>
     let showHiddenFiles: Bool
+    // Forces the readdir+fstatat fallback path for every directory in the scan,
+    // bypassing getattrlistbulk entirely. Used by parity tests to compare the
+    // two enumeration strategies against each other.
+    let forceFallbackEnum: Bool
 
     static func loadFromUserDefaults() -> ScanConfig {
         let rawExcluded = UserDefaults.standard.string(forKey: "excludedFolderNames")
             ?? ".git,node_modules,DerivedData,.Trash"
         let excludedNames = Set(rawExcluded.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
         let showHiddenFiles = UserDefaults.standard.bool(forKey: "showHiddenFiles")
-        return ScanConfig(excludedNames: excludedNames, showHiddenFiles: showHiddenFiles)
+        let forceFallbackEnum = ProcessInfo.processInfo.environment["MDS_FORCE_FALLBACK_ENUM"] == "1"
+        return ScanConfig(excludedNames: excludedNames, showHiddenFiles: showHiddenFiles, forceFallbackEnum: forceFallbackEnum)
     }
 }
 
@@ -115,10 +96,6 @@ public actor FileScanner {
             let counter = ProgressCounter()
             let visited = VisitedSet()
             let config = ScanConfig.loadFromUserDefaults()
-            let taskBudget = TaskBudget(limit: min(max(4, ProcessInfo.processInfo.activeProcessorCount), 16))
-            // Get the root device ID to detect mount points
-            var rootStat = stat()
-            let rootDev: dev_t? = (stat(url.path, &rootStat) == 0) ? rootStat.st_dev : nil
 
             // Emit periodic progress updates every 0.2s
             let progressTask = Task {
@@ -130,7 +107,7 @@ public actor FileScanner {
             }
 
             do {
-                let root = try await _buildTree(path: url.path, url: url, parent: nil, rootDev: rootDev, counter: counter, visited: visited, config: config, taskBudget: taskBudget)
+                let root = try await _buildTree(rootPath: url.path, rootURL: url, counter: counter, visited: visited, config: config)
                 progressTask.cancel()
                 continuation.yield(.completed(root: root, deniedCount: counter.deniedCount))
             } catch is CancellationError {
@@ -146,191 +123,282 @@ public actor FileScanner {
     }
 }
 
-// MARK: - POSIX-based parallel tree builder (free functions, not actor-isolated)
+// MARK: - Iterative work-stack tree builder (free functions, not actor-isolated)
+//
+// Concurrency invariant: a directory's `FSNode.children` array is written by
+// exactly one worker (the one that processes that directory's work item), and
+// every child FSNode is created by the parent's worker before being handed to
+// the shared queue as a new work item. So no two workers ever touch the same
+// node's mutable state concurrently, even though FSNode is `@unchecked Sendable`.
+
+private struct DirWorkItem {
+    let path: String
+    let url: URL
+    let node: FSNode
+    // Identity recorded at discovery time (nil only for the scan root, which
+    // was just lstat'd immediately before being opened). Re-checked via fstat
+    // right after opening the directory, so a directory replaced in-between
+    // (TOCTOU) is detected and skipped rather than silently scanned wrong.
+    let expectedDev: UInt64?
+    let expectedIno: UInt64?
+}
+
+// Bounded-concurrency work queue: a LIFO stack plus an in-flight counter.
+// `pop()` returning nil doesn't mean "done" by itself - workers must also
+// check `isFinished` (stack empty AND nothing in flight) before exiting, since
+// another worker's current item may still push more work.
+private final class WorkQueue: @unchecked Sendable {
+    private var lock = os_unfair_lock()
+    private var stack: [DirWorkItem]
+    private var inFlight: Int
+
+    init(seed: DirWorkItem) {
+        stack = [seed]
+        inFlight = 1
+    }
+
+    func push(_ item: DirWorkItem) {
+        os_unfair_lock_lock(&lock)
+        stack.append(item)
+        inFlight += 1
+        os_unfair_lock_unlock(&lock)
+    }
+
+    func pop() -> DirWorkItem? {
+        os_unfair_lock_lock(&lock)
+        let item = stack.popLast()
+        os_unfair_lock_unlock(&lock)
+        return item
+    }
+
+    // Call exactly once per item that was popped, after it has been fully
+    // processed (including pushing any children it discovered).
+    func markDone() {
+        os_unfair_lock_lock(&lock)
+        inFlight -= 1
+        os_unfair_lock_unlock(&lock)
+    }
+
+    var isFinished: Bool {
+        os_unfair_lock_lock(&lock)
+        let finished = stack.isEmpty && inFlight == 0
+        os_unfair_lock_unlock(&lock)
+        return finished
+    }
+}
 
 private func _buildTree(
-    path: String,
-    url: URL,
-    parent: FSNode?,
-    rootDev: dev_t?,
+    rootPath: String,
+    rootURL: URL,
     counter: ProgressCounter,
     visited: VisitedSet,
-    config: ScanConfig,
-    taskBudget: TaskBudget
+    config: ScanConfig
 ) async throws -> FSNode {
     try Task.checkCancellation()
 
     var st = stat()
-    guard lstat(path, &st) == 0 else { return FSNode(url: url, name: url.lastPathComponent, isDirectory: false, size: 0, fileExtension: "", parent: parent) }
+    guard lstat(rootPath, &st) == 0 else {
+        return FSNode(url: rootURL, name: rootURL.lastPathComponent, isDirectory: false, size: 0, fileExtension: "", parent: nil)
+    }
 
-    // Skip symlinks
+    // Skip symlinks (including a symlink scan root).
     if st.st_mode & S_IFMT == S_IFLNK { throw SkipError() }
 
     let isDir = st.st_mode & S_IFMT == S_IFDIR
+    let name = rootURL.lastPathComponent
 
-    // Deduplicate directories by (dev, ino) — prevents double-counting paths like
-    // /Applications and /System/Volumes/Data/Applications (same inode, different paths).
-    if isDir {
-        guard visited.visit(dev: st.st_dev, ino: st.st_ino) else {
-            if ProcessInfo.processInfo.environment["MDS_DEBUG_SKIPS"] != nil {
-                FileHandle.standardError.write("DEDUP_SKIP dev=\(st.st_dev) ino=\(st.st_ino) \(path)\n".data(using: .utf8)!)
-            }
-            throw SkipError()
-        }
+    guard isDir else {
+        // A file was passed directly as the scan root.
+        let ext = rootURL.pathExtension.lowercased()
+        let allocSize = allocatedSize(st: st, visited: visited)
+        let node = FSNode(url: rootURL, name: name, isDirectory: false, size: allocSize, fileExtension: ext, parent: nil)
+        if st.st_nlink > 1 { node.hardLinkRef = hardLinkRef(of: st) }
+        counter.add(items: 1, bytes: allocSize)
+        return node
     }
 
-    let name = url.lastPathComponent
-    let ext = isDir ? "" : url.pathExtension.lowercased()
+    let rootDevKey = UInt64(bitPattern: Int64(st.st_dev))
+    let rootInoKey = UInt64(st.st_ino)
+    // First visit of this scan always succeeds (fresh VisitedSet); kept for
+    // symmetry with the dedup check every subdirectory goes through below.
+    _ = visited.visit(dev: rootDevKey, ino: rootInoKey)
 
-    let node = FSNode(url: url, name: name, isDirectory: isDir, size: 0, fileExtension: ext, parent: parent)
+    let rootNode = FSNode(url: rootURL, name: name, isDirectory: true, size: 0, fileExtension: "", parent: nil)
+    let seed = DirWorkItem(path: rootPath, url: rootURL, node: rootNode, expectedDev: rootDevKey, expectedIno: rootInoKey)
+    let queue = WorkQueue(seed: seed)
 
-    if isDir {
-        let listing = _listDirectory(path: path, url: url, rootDev: rootDev, node: node, counter: counter, visited: visited, config: config)
+    let workerCount = min(max(2, ProcessInfo.processInfo.activeProcessorCount / 2), 8)
 
-        // Accumulate direct file sizes immediately
-        node.size = listing.totalSize
-        node.children = listing.children
-        node.isAccessDenied = listing.accessDenied
-        if listing.accessDenied { counter.addDenied() }
-
-        // Recurse into subdirectories, in parallel up to the task budget; beyond
-        // that, recurse inline in the current task to bound total concurrency.
-        if !listing.subdirPaths.isEmpty {
-            var subdirSize: Int64 = 0
-            try await withThrowingTaskGroup(of: FSNode?.self) { group in
-                for (subPath, subURL) in listing.subdirPaths {
-                    if taskBudget.tryAcquire() {
-                        group.addTask {
-                            defer { taskBudget.release() }
-                            // Propagate cancellation; silently skip symlinks / unreadable entries.
-                            try Task.checkCancellation()
-                            do {
-                                return try await _buildTree(path: subPath, url: subURL, parent: node, rootDev: rootDev, counter: counter, visited: visited, config: config, taskBudget: taskBudget)
-                            } catch is SkipError {
-                                return nil
-                            }
-                        }
-                    } else {
-                        // Budget exhausted: recurse inline (no new task spawned) to
-                        // bound concurrency without blocking on any lock or semaphore.
-                        try Task.checkCancellation()
-                        do {
-                            let child = try await _buildTree(path: subPath, url: subURL, parent: node, rootDev: rootDev, counter: counter, visited: visited, config: config, taskBudget: taskBudget)
-                            node.children.append(child)
-                            subdirSize += child.size
-                        } catch is SkipError {
-                            // skip
-                        }
-                    }
-                }
-                for try await child in group {
-                    guard let child else { continue }
-                    node.children.append(child)
-                    subdirSize += child.size
-                }
+    try await withThrowingTaskGroup(of: Void.self) { group in
+        for _ in 0..<workerCount {
+            group.addTask {
+                try await _runWorker(queue: queue, rootDevKey: rootDevKey, counter: counter, visited: visited, config: config)
             }
-            node.size += subdirSize
         }
-
-        counter.add(items: 1, bytes: 0)
-    } else {
-        // Allocated size: st_blocks * 512 gives actual disk usage
-        let allocatedSize = Int64(st.st_blocks) * 512
-        node.size = allocatedSize
-        counter.add(items: 1, bytes: allocatedSize)
+        try await group.waitForAll()
     }
 
-    return node
+    aggregateDirectorySizes(root: rootNode)
+    return rootNode
 }
 
-private struct SubdirEntry {
-    let path: String
-    let url: URL
+private func _runWorker(
+    queue: WorkQueue,
+    rootDevKey: UInt64,
+    counter: ProgressCounter,
+    visited: VisitedSet,
+    config: ScanConfig
+) async throws {
+    while true {
+        try Task.checkCancellation()
+        if let item = queue.pop() {
+            try _processDirectory(item: item, rootDevKey: rootDevKey, counter: counter, visited: visited, config: config, queue: queue)
+            continue
+        }
+        if queue.isFinished { return }
+        await Task.yield()
+    }
 }
 
-private struct DirectoryContents {
-    var children: [FSNode]       // immediate file children already created
-    var subdirPaths: [(String, URL)]  // subdirectory (path, url) pairs for parallel recursion
-    var totalSize: Int64         // sum of immediate file sizes
-    var itemCount: Int           // count of items processed here
-    var accessDenied: Bool = false  // true when opendir failed due to permissions (EACCES/EPERM)
-}
+// Processes exactly one directory: opens it, lists its immediate children
+// (bulk enumeration with fallback), applies all scan semantics, records
+// direct file children + their sizes on `item.node`, and pushes any
+// subdirectories as new work items. Always calls `queue.markDone()` exactly
+// once, even on early return.
+private func _processDirectory(
+    item: DirWorkItem,
+    rootDevKey: UInt64,
+    counter: ProgressCounter,
+    visited: VisitedSet,
+    config: ScanConfig,
+    queue: WorkQueue
+) throws {
+    defer { queue.markDone() }
+    try Task.checkCancellation()
 
-private func _listDirectory(path: String, url: URL, rootDev: dev_t?, node: FSNode, counter: ProgressCounter, visited: VisitedSet, config: ScanConfig) -> DirectoryContents {
-    var result = DirectoryContents(children: [], subdirPaths: [], totalSize: 0, itemCount: 0)
-
-    guard let dir = opendir(path) else {
+    let fd = open(item.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    guard fd >= 0 else {
         if errno == EACCES || errno == EPERM {
-            result.accessDenied = true
+            item.node.isAccessDenied = true
+            counter.addDenied()
         }
-        return result
+        counter.add(items: 1, bytes: 0)
+        return
     }
-    defer { closedir(dir) }
-    let directoryFD = dirfd(dir)
+    defer { close(fd) }
 
-    while let entry = readdir(dir) {
-        let nameBytes = entry.pointee.d_name
-        let name: String = withUnsafeBytes(of: nameBytes) { ptr in
-            let bytes = ptr.bindMemory(to: CChar.self)
-            return String(cString: bytes.baseAddress!)
+    if let expectedDev = item.expectedDev, let expectedIno = item.expectedIno {
+        var st = stat()
+        guard fstat(fd, &st) == 0,
+              UInt64(bitPattern: Int64(st.st_dev)) == expectedDev,
+              UInt64(st.st_ino) == expectedIno else {
+            // The directory at this path was replaced between discovery and
+            // open (TOCTOU race); drop it silently rather than scan the wrong thing.
+            return
         }
-        guard name != "." && name != ".." else { continue }
-        if name.hasPrefix("."), !config.showHiddenFiles { continue }
-        if config.excludedNames.contains(name) { continue }
+    }
 
-        let childURL = url.appendingPathComponent(name, isDirectory: entry.pointee.d_type == DT_DIR)
-        let dtype = entry.pointee.d_type
+    let entries: [BulkDirEntry]
+    do {
+        entries = try listDirectoryEntries(path: item.path, fd: fd, forceFallback: config.forceFallbackEnum)
+    } catch {
+        // Enumeration failed even after falling back: treat as empty, not denied.
+        counter.add(items: 1, bytes: 0)
+        return
+    }
 
-        // Fast type check using d_type from dirent (avoids extra stat call for most entries)
-        if dtype == DT_LNK { continue }  // skip symlinks
+    var directSize: Int64 = 0
+    var children: [FSNode] = []
+    children.reserveCapacity(entries.count)
 
-        if dtype == DT_DIR || dtype == DT_UNKNOWN {
-            // For DT_UNKNOWN (e.g. some network filesystems), use lstat
-            var st = stat()
-            let childPath = path.hasSuffix("/") ? path + name : path + "/" + name
-            if dtype == DT_UNKNOWN {
-                guard fstatat(directoryFD, name, &st, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
-                let mode = st.st_mode & S_IFMT
-                if mode == S_IFLNK { continue }
-                if mode != S_IFDIR {
-                    // It's a regular file with DT_UNKNOWN
-                    let allocSize = allocatedSize(st: st, visited: visited)
-                    let ext = childURL.pathExtension.lowercased()
-                    let fileNode = FSNode(url: childURL, name: name, isDirectory: false, size: allocSize, fileExtension: ext, parent: node)
-                    if st.st_nlink > 1 { fileNode.hardLinkRef = hardLinkRef(of: st) }
-                    result.children.append(fileNode)
-                    result.totalSize += allocSize
-                    result.itemCount += 1
-                    counter.add(items: 1, bytes: allocSize)
-                    continue
-                }
-                // Check mount point via st_dev
-                if let rootDev, st.st_dev != rootDev { continue }
-                result.subdirPaths.append((childPath, childURL))
-            } else {
-                // DT_DIR — check mount point via a quick stat
-                if let rootDev {
-                    guard fstatat(directoryFD, name, &st, 0) == 0 else { continue }
-                    if st.st_dev != rootDev { continue }
-                }
-                result.subdirPaths.append((childPath, childURL))
-            }
-        } else if dtype == DT_REG {
-            var st = stat()
-            guard fstatat(directoryFD, name, &st, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
-            let allocSize = allocatedSize(st: st, visited: visited)
+    for (index, entry) in entries.enumerated() {
+        if index % 256 == 0 {
+            try Task.checkCancellation()
+        }
+        guard entry.name != "." && entry.name != ".." else { continue }
+        if entry.name.hasPrefix("."), !config.showHiddenFiles { continue }
+        if config.excludedNames.contains(entry.name) { continue }
+
+        switch entry.kind {
+        case .symlink, .other:
+            continue
+
+        case .directory:
+            // Mount point: skip directories on a different device than the scan root.
+            if entry.dev != rootDevKey { continue }
+            // Dedup by (dev, ino): protects against firmlink aliases like
+            // /Applications vs /System/Volumes/Data/Applications.
+            guard visited.visit(dev: entry.dev, ino: entry.ino) else { continue }
+
+            let childURL = item.url.appendingPathComponent(entry.name, isDirectory: true)
+            let childNode = FSNode(url: childURL, name: entry.name, isDirectory: true, size: 0, fileExtension: "", parent: item.node)
+            children.append(childNode)
+            let childPath = item.path.hasSuffix("/") ? item.path + entry.name : item.path + "/" + entry.name
+            queue.push(DirWorkItem(path: childPath, url: childURL, node: childNode, expectedDev: entry.dev, expectedIno: entry.ino))
+
+        case .file:
+            let childURL = item.url.appendingPathComponent(entry.name, isDirectory: false)
+            let allocSize = bulkAllocatedSize(entry: entry, visited: visited)
             let ext = childURL.pathExtension.lowercased()
-            let fileNode = FSNode(url: childURL, name: name, isDirectory: false, size: allocSize, fileExtension: ext, parent: node)
-            if st.st_nlink > 1 { fileNode.hardLinkRef = hardLinkRef(of: st) }
-            result.children.append(fileNode)
-            result.totalSize += allocSize
-            result.itemCount += 1
+            let fileNode = FSNode(url: childURL, name: entry.name, isDirectory: false, size: allocSize, fileExtension: ext, parent: item.node)
+            if entry.linkCount > 1 { fileNode.hardLinkRef = HardLinkRef(dev: entry.dev, ino: entry.ino) }
+            children.append(fileNode)
+            directSize += allocSize
             counter.add(items: 1, bytes: allocSize)
         }
-        // DT_FIFO, DT_CHR, DT_BLK, DT_SOCK — skip
     }
 
-    return result
+    item.node.children = children
+    item.node.size = directSize
+    counter.add(items: 1, bytes: 0)
+}
+
+// Picks bulk vs. fallback enumeration for one directory. If bulk enumeration
+// throws partway through (having already consumed some of `fd`'s kernel-side
+// listing position), the fallback re-opens the directory fresh by path so it
+// always sees the complete, unconsumed listing rather than a partial remainder.
+private func listDirectoryEntries(path: String, fd: Int32, forceFallback: Bool) throws -> [BulkDirEntry] {
+    if forceFallback {
+        return try fallbackEnumerateDirectory(fd: fd)
+    }
+    do {
+        return try enumerateDirectoryBulk(fd: fd)
+    } catch is BulkEnumerationUnavailable {
+        let freshFD = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        guard freshFD >= 0 else { return [] }
+        defer { close(freshFD) }
+        return try fallbackEnumerateDirectory(fd: freshFD)
+    }
+}
+
+// Iterative post-order pass: folds each directory's descendant directory
+// sizes into its own `size` (which already holds its direct file sum from
+// `_processDirectory`). Runs once, after all workers finish, so there is no
+// concurrent mutation of node.size during traversal.
+private func aggregateDirectorySizes(root: FSNode) {
+    guard root.isDirectory else { return }
+
+    // `order` ends up a valid pre-order (a node always precedes its own
+    // descendants, since children are only pushed after their parent is
+    // appended). Processing it in reverse guarantees every directory's
+    // children are fully aggregated before the directory itself is folded
+    // into its own parent.
+    var order: [FSNode] = []
+    var stack: [FSNode] = [root]
+    while let node = stack.popLast() {
+        order.append(node)
+        for child in node.children where child.isDirectory {
+            stack.append(child)
+        }
+    }
+
+    for node in order.reversed() {
+        var subtreeAddition: Int64 = 0
+        for child in node.children where child.isDirectory {
+            subtreeAddition += child.size
+        }
+        node.size += subtreeAddition
+    }
 }
 
 // Builds the inode identity for a hardlinked file. dev_t is a signed 32-bit value
@@ -342,11 +410,22 @@ private func hardLinkRef(of st: stat) -> HardLinkRef {
 // Returns the file's allocated disk bytes, deduplicating hardlinks via the visited set.
 // Files with nlink == 1 skip the set entirely (fast path for the common case).
 // Hardlinked files (nlink > 1) are counted only on their first encounter.
+// Used only for a file passed directly as the scan root; regular directory
+// listings use `bulkAllocatedSize` on the enumerator's own metadata instead.
 private func allocatedSize(st: stat, visited: VisitedSet) -> Int64 {
     if st.st_nlink > 1 {
-        guard visited.visit(dev: st.st_dev, ino: st.st_ino) else { return 0 }
+        guard visited.visit(dev: UInt64(bitPattern: Int64(st.st_dev)), ino: UInt64(st.st_ino)) else { return 0 }
     }
     return Int64(st.st_blocks) * 512
+}
+
+// Same dedup rule as `allocatedSize(st:visited:)` above, but sourced from a
+// `BulkDirEntry` (either enumeration path) instead of a raw `stat`.
+private func bulkAllocatedSize(entry: BulkDirEntry, visited: VisitedSet) -> Int64 {
+    if entry.linkCount > 1 {
+        guard visited.visit(dev: entry.dev, ino: entry.ino) else { return 0 }
+    }
+    return entry.allocatedSize
 }
 
 private struct SkipError: Error {}
