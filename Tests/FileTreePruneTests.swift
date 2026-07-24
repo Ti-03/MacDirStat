@@ -233,6 +233,124 @@ final class FileTreePruneTests: XCTestCase {
         XCTAssertEqual(newRoot.size, 900 - 300, "duplicate seeds in the list must not subtract twice")
         assertValidTopology(pruned)
     }
+
+    // MARK: - removingSubtrees: hardlink survivor promotion (BUG 1)
+
+    // A single hardlinked pair split across two sibling directories:
+    //   root (/scan)                          size 500
+    //     ├── A (dir)                          size 500
+    //     │    └── big.bin (500, ref R, carrier)
+    //     └── B (dir)                          size 0
+    //          └── twin.bin (0, ref R)
+    private func makeHardlinkPairFixture() -> (root: FSNode, dirA: FSNode, big: FSNode, dirB: FSNode, twin: FSNode) {
+        let ref = HardLinkRef(dev: 1, ino: 42)
+        let root = FSNode(url: URL(fileURLWithPath: "/scan"), name: "scan", isDirectory: true, size: 0, fileExtension: "", parent: nil)
+        let dirA = FSNode(url: URL(fileURLWithPath: "/scan/A"), name: "A", isDirectory: true, size: 500, fileExtension: "", parent: root)
+        let big = FSNode(url: URL(fileURLWithPath: "/scan/A/big.bin"), name: "big.bin", isDirectory: false, size: 500, fileExtension: "bin", parent: dirA)
+        big.hardLinkRef = ref
+        dirA.children = [big]
+        let dirB = FSNode(url: URL(fileURLWithPath: "/scan/B"), name: "B", isDirectory: true, size: 0, fileExtension: "", parent: root)
+        let twin = FSNode(url: URL(fileURLWithPath: "/scan/B/twin.bin"), name: "twin.bin", isDirectory: false, size: 0, fileExtension: "bin", parent: dirB)
+        twin.hardLinkRef = ref
+        dirB.children = [twin]
+        root.children = [dirA, dirB]
+        root.size = dirA.size + dirB.size
+        return (root, dirA, big, dirB, twin)
+    }
+
+    func test_removingSubtree_trashing_size_carrier_promotes_surviving_twin_root_total_unchanged() {
+        let (root, _, big, _, _) = makeHardlinkPairFixture()
+        let tree = FileTreeBuilder.build(from: root, rootPath: "/scan")
+        let bigNode = node(named: "big.bin", in: tree)
+        let originalRootSize = tree.records[tree.rootIndex].size // 500
+
+        let pruned = tree.removingSubtree(at: bigNode.index)
+
+        let newRoot = FileNode(tree: pruned, index: pruned.rootIndex)
+        XCTAssertEqual(newRoot.size, originalRootSize, "root total must be unchanged — the disk usage didn't change, only which path carries it")
+        let newDirA = newRoot.children.first { $0.name == "A" }!
+        XCTAssertEqual(newDirA.size, 0, "carrier's own ancestor (A) must still lose the size")
+        let newDirB = newRoot.children.first { $0.name == "B" }!
+        XCTAssertEqual(newDirB.size, 500, "twin's ancestor (B) must gain exactly the promoted size")
+        let newTwin = newDirB.children.first { $0.name == "twin.bin" }!
+        XCTAssertEqual(newTwin.size, 500, "surviving twin must be promoted to the carrier's full size")
+        assertValidTopology(pruned)
+    }
+
+    func test_removingSubtree_trashing_zero_size_twin_does_not_promote_and_leaves_root_unchanged() {
+        let (root, _, big, _, twin) = makeHardlinkPairFixture()
+        let tree = FileTreeBuilder.build(from: root, rootPath: "/scan")
+        let twinNode = node(named: "twin.bin", in: tree)
+        let originalRootSize = tree.records[tree.rootIndex].size // 500
+        _ = big; _ = twin
+
+        let pruned = tree.removingSubtree(at: twinNode.index)
+
+        let newRoot = FileNode(tree: pruned, index: pruned.rootIndex)
+        XCTAssertEqual(newRoot.size, originalRootSize, "subtracting a 0-size twin must leave the root total unchanged")
+        let newDirA = newRoot.children.first { $0.name == "A" }!
+        XCTAssertEqual(newDirA.size, 500, "the surviving carrier must be untouched — no promotion should have happened")
+        let newBig = newDirA.children.first { $0.name == "big.bin" }!
+        XCTAssertEqual(newBig.size, 500)
+        assertValidTopology(pruned)
+    }
+
+    func test_removingSubtrees_both_hardlink_links_removed_together_drops_size_exactly_once() {
+        let (root, _, big, _, twin) = makeHardlinkPairFixture()
+        let tree = FileTreeBuilder.build(from: root, rootPath: "/scan")
+        let bigNode = node(named: "big.bin", in: tree)
+        let twinNode = node(named: "twin.bin", in: tree)
+        _ = big; _ = twin
+
+        let pruned = tree.removingSubtrees(at: [bigNode.index, twinNode.index])
+
+        let newRoot = FileNode(tree: pruned, index: pruned.rootIndex)
+        XCTAssertEqual(newRoot.size, 0, "with no surviving link, the inode's size must drop out exactly once (500 - 500 - 0)")
+        assertValidTopology(pruned)
+    }
+
+    func test_removingSubtrees_two_independent_hardlink_pairs_each_promote_their_own_twin() {
+        let refR1 = HardLinkRef(dev: 1, ino: 100)
+        let refR2 = HardLinkRef(dev: 1, ino: 200)
+        let root = FSNode(url: URL(fileURLWithPath: "/scan"), name: "scan", isDirectory: true, size: 0, fileExtension: "", parent: nil)
+
+        let dirA1 = FSNode(url: URL(fileURLWithPath: "/scan/A1"), name: "A1", isDirectory: true, size: 500, fileExtension: "", parent: root)
+        let bigA = FSNode(url: URL(fileURLWithPath: "/scan/A1/bigA.bin"), name: "bigA.bin", isDirectory: false, size: 500, fileExtension: "bin", parent: dirA1)
+        bigA.hardLinkRef = refR1
+        dirA1.children = [bigA]
+
+        let dirA2 = FSNode(url: URL(fileURLWithPath: "/scan/A2"), name: "A2", isDirectory: true, size: 0, fileExtension: "", parent: root)
+        let twinA = FSNode(url: URL(fileURLWithPath: "/scan/A2/twinA.bin"), name: "twinA.bin", isDirectory: false, size: 0, fileExtension: "bin", parent: dirA2)
+        twinA.hardLinkRef = refR1
+        dirA2.children = [twinA]
+
+        let dirB1 = FSNode(url: URL(fileURLWithPath: "/scan/B1"), name: "B1", isDirectory: true, size: 300, fileExtension: "", parent: root)
+        let bigB = FSNode(url: URL(fileURLWithPath: "/scan/B1/bigB.bin"), name: "bigB.bin", isDirectory: false, size: 300, fileExtension: "bin", parent: dirB1)
+        bigB.hardLinkRef = refR2
+        dirB1.children = [bigB]
+
+        let dirB2 = FSNode(url: URL(fileURLWithPath: "/scan/B2"), name: "B2", isDirectory: true, size: 0, fileExtension: "", parent: root)
+        let twinB = FSNode(url: URL(fileURLWithPath: "/scan/B2/twinB.bin"), name: "twinB.bin", isDirectory: false, size: 0, fileExtension: "bin", parent: dirB2)
+        twinB.hardLinkRef = refR2
+        dirB2.children = [twinB]
+
+        root.children = [dirA1, dirA2, dirB1, dirB2]
+        root.size = 500 + 0 + 300 + 0 // 800
+
+        let tree = FileTreeBuilder.build(from: root, rootPath: "/scan")
+        let bigANode = node(named: "bigA.bin", in: tree)
+        let bigBNode = node(named: "bigB.bin", in: tree)
+
+        let pruned = tree.removingSubtrees(at: [bigANode.index, bigBNode.index])
+
+        let newRoot = FileNode(tree: pruned, index: pruned.rootIndex)
+        XCTAssertEqual(newRoot.size, 800, "root total must be unchanged: each pair's bytes just moved to its own surviving twin")
+        let newTwinA = newRoot.children.first { $0.name == "A2" }!.children.first { $0.name == "twinA.bin" }!
+        XCTAssertEqual(newTwinA.size, 500, "twinA must be promoted with its own pair's size")
+        let newTwinB = newRoot.children.first { $0.name == "B2" }!.children.first { $0.name == "twinB.bin" }!
+        XCTAssertEqual(newTwinB.size, 300, "twinB must be promoted with its own pair's size, independently of twinA")
+        assertValidTopology(pruned)
+    }
 }
 
 // MARK: - ScanViewModel-level integration

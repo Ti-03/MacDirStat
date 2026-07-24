@@ -153,6 +153,19 @@ public final class FileTree: @unchecked Sendable {
     // resulting old->new index map. This is O(n) total rather than O(n·k)
     // for k removed subtrees, while remaining just as simple to reason about
     // as folding would be (a fold is also correct here — just slower).
+    //
+    // Hardlink-aware (first-seen-wins survivor promotion): the scanner's
+    // convention is that a hardlinked inode's allocated size is carried by
+    // exactly one node (the "size carrier"; see `bulkAllocatedSize` /
+    // `VisitedSet` in FileScanner.swift), while every other node sharing its
+    // `hardLinkRef` sits at size 0. If a removed subtree contains a size
+    // carrier, and a node OUTSIDE the removed set shares its `hardLinkRef`
+    // and is still at size 0, that surviving twin is promoted to carry the
+    // size instead — otherwise the inode's bytes would simply vanish from
+    // the tree (the disk usage didn't change just because one of the
+    // inode's N links got removed). If no such survivor exists, every link
+    // to that inode is gone, and the existing subtract-only behavior below
+    // is already correct.
     public func removingSubtrees(at indices: [Int]) -> FileTree {
         let count = records.count
 
@@ -194,6 +207,36 @@ public final class FileTree: @unchecked Sendable {
             let newIdx = oldToNew[old]
             let oldParent = parentIndex[old]
             newParentIndex[newIdx] = oldParent >= 0 ? oldToNew[oldParent] : -1
+        }
+
+        // Hardlink survivor promotion, computed against the ORIGINAL tree
+        // before any deltas are applied. One pass over survivors builds
+        // ref -> first zero-size surviving index (not O(n·k) per carrier),
+        // then one pass over removed nodes finds carriers and looks each up.
+        var survivorTwinByRef: [HardLinkRef: Int] = [:]
+        for old in 0..<count where !removed[old] {
+            guard let ref = records[old].hardLinkRef, records[old].size == 0 else { continue }
+            if survivorTwinByRef[ref] == nil {
+                survivorTwinByRef[ref] = old
+            }
+        }
+        var promotedRefs = Set<HardLinkRef>()
+        var promotions: [(survivorOld: Int, size: Int64)] = []
+        for old in 0..<count where removed[old] {
+            guard let ref = records[old].hardLinkRef, records[old].size > 0 else { continue }
+            // Defensive: first-seen-wins means at most one carrier per ref
+            // should ever exist, but never promote the same ref twice.
+            guard promotedRefs.insert(ref).inserted else { continue }
+            guard let survivorOld = survivorTwinByRef[ref] else { continue } // no survivor -> no promotion
+            promotions.append((survivorOld, records[old].size))
+        }
+        for (survivorOld, size) in promotions {
+            newRecords[oldToNew[survivorOld]].size = size
+            var ancestorOld = parentIndex[survivorOld]
+            while ancestorOld >= 0 {
+                newRecords[oldToNew[ancestorOld]].size += size
+                ancestorOld = parentIndex[ancestorOld]
+            }
         }
 
         // Subtract each removed subtree's root size from every one of its
@@ -239,6 +282,31 @@ public final class FileTree: @unchecked Sendable {
                 }
             }
             newChildCount[newIdx] = kept
+        }
+
+        // Re-sort every ancestor span a promotion could have disturbed: the
+        // promoted twin's own parent (one member jumped from 0 to `size`)
+        // and every ancestor above it up to root (same members, but one now
+        // has a different size) — same reasoning as `replacingSubtree`'s own
+        // ancestor re-sort below. Deduped across promotions since several
+        // independent hardlink pairs can share ancestors (e.g. root).
+        if !promotions.isEmpty {
+            var ancestorNewIndices = Set<Int>()
+            for (survivorOld, _) in promotions {
+                var a = parentIndex[survivorOld]
+                while a >= 0 {
+                    ancestorNewIndices.insert(oldToNew[a])
+                    a = parentIndex[a]
+                }
+            }
+            for newIdx in ancestorNewIndices {
+                let start = newChildStart[newIdx]
+                let cnt = newChildCount[newIdx]
+                guard cnt > 1 else { continue }
+                var slice = Array(newChildIndices[start..<(start + cnt)])
+                slice.sort { newRecords[$0].size > newRecords[$1].size }
+                newChildIndices.replaceSubrange(start..<(start + cnt), with: slice)
+            }
         }
 
         return FileTree(
