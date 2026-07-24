@@ -1,0 +1,14 @@
+# Keep dependencies fresh: SwiftPM packages and the GitHub Actions used in CI.
+# Actions are pinned to commit SHAs in the workflows; Dependabot understands
+# the trailing `# vN` comment and keeps both the SHA and the comment updated.
+version: 2
+updates:
+  - package-ecosystem: swift
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
