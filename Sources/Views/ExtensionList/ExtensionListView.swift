@@ -8,7 +8,7 @@ struct ExtensionListView: View {
     private let topN = 5
 
     // Show selected item, or fall back to the current chart root
-    private var displayNode: FSNode? { vm.selectedNode ?? vm.treemapRoot }
+    private var displayNode: FileNode? { vm.selectedNode ?? vm.treemapRoot }
 
     var body: some View {
         VStack(spacing: 0) {

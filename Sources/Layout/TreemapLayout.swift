@@ -21,7 +21,7 @@ public struct TreemapLayout {
     // Gentle per-depth darkening so deep files stay recognisable
     private static let depthDarken: [Double] = [0.0, 0.10, 0.18, 0.26, 0.32, 0.38]
 
-    public static func compute(root: FSNode, in rect: CGRect, colorMap: ExtensionColorMap) -> [TreemapCell] {
+    public static func compute(root: FileNode, in rect: CGRect, colorMap: ExtensionColorMap) -> [TreemapCell] {
         var cells: [TreemapCell] = []
         guard rect.width > 1, rect.height > 1, root.size > 0 else { return cells }
 
@@ -41,7 +41,7 @@ public struct TreemapLayout {
     }
 
     private static func layout(
-        _ children: [FSNode],
+        _ children: [FileNode],
         parentStart: Double,
         parentEnd: Double,
         depth: Int,
@@ -100,7 +100,7 @@ public struct TreemapLayout {
         return Double(hash % 360) / 360.0
     }
 
-    private static func color(for node: FSNode, depth: Int, colorMap: ExtensionColorMap) -> Color {
+    private static func color(for node: FileNode, depth: Int, colorMap: ExtensionColorMap) -> Color {
         if node.isSynthetic {
             // Distinct muted gray so the hidden-space reconciliation node reads as
             // "not a real file" at a glance, rather than blending into the chart.

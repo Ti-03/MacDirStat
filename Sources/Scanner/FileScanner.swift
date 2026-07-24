@@ -119,9 +119,9 @@ public actor FileScanner {
             }
 
             do {
-                let root = try await _buildTree(rootPath: url.path, rootURL: url, counter: counter, visited: visited, config: config)
+                let tree = try await _buildTree(rootPath: url.path, rootURL: url, counter: counter, visited: visited, config: config)
                 progressTask.cancel()
-                continuation.yield(.completed(root: root, deniedCount: counter.deniedCount))
+                continuation.yield(.completed(tree: tree, deniedCount: counter.deniedCount))
             } catch is CancellationError {
                 progressTask.cancel()
             } catch {
@@ -208,12 +208,13 @@ private func _buildTree(
     counter: ProgressCounter,
     visited: VisitedSet,
     config: ScanConfig
-) async throws -> FSNode {
+) async throws -> FileTree {
     try Task.checkCancellation()
 
     var st = stat()
     guard lstat(rootPath, &st) == 0 else {
-        return FSNode(url: rootURL, name: rootURL.lastPathComponent, isDirectory: false, size: 0, fileExtension: "", parent: nil)
+        let node = FSNode(url: rootURL, name: rootURL.lastPathComponent, isDirectory: false, size: 0, fileExtension: "", parent: nil)
+        return FileTreeBuilder.build(from: node, rootPath: rootPath)
     }
 
     // Skip symlinks (including a symlink scan root).
@@ -229,7 +230,7 @@ private func _buildTree(
         let node = FSNode(url: rootURL, name: name, isDirectory: false, size: allocSize, fileExtension: ext, parent: nil)
         if st.st_nlink > 1 { node.hardLinkRef = hardLinkRef(of: st) }
         counter.add(items: 1, bytes: allocSize)
-        return node
+        return FileTreeBuilder.build(from: node, rootPath: rootPath)
     }
 
     let rootDevKey = UInt64(bitPattern: Int64(st.st_dev))
@@ -254,7 +255,7 @@ private func _buildTree(
     }
 
     aggregateDirectorySizes(root: rootNode)
-    return rootNode
+    return FileTreeBuilder.build(from: rootNode, rootPath: rootPath)
 }
 
 private func _runWorker(

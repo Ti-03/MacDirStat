@@ -3,27 +3,31 @@ import SwiftUI
 
 @MainActor
 public final class ScanViewModel: ObservableObject {
-    @Published public var root: FSNode?
+    // The flat store the scanner hands back (see Sources/Model/). `root` is
+    // a computed FileNode handle onto it, kept under the old name so views
+    // that just read `vm.root` didn't need to change.
+    @Published public var tree: FileTree?
     @Published public var cells: [TreemapCell] = []
     @Published public var colorMap: ExtensionColorMap?
-    @Published public var selectedNode: FSNode?
+    @Published public var selectedNode: FileNode?
     @Published public var isScanning: Bool = false
     @Published public var itemsScanned: Int = 0
     @Published public var bytesFound: Int64 = 0
     @Published public var errorMessage: String?
     @Published public var duplicatesReady: Bool = false
-    @Published public var drillStack: [FSNode] = []
+    @Published public var drillStack: [FileNode] = []
     @Published public var highlightedExtension: String?
     @Published public var isComputingLayout: Bool = false
     @Published public var scanURL: URL?
     @Published public var extensionSummaries: [ExtensionSummary] = []
-    @Published public var duplicateGroups: [[FSNode]] = []
+    @Published public var duplicateGroups: [[FileNode]] = []
     @Published public var hasFullDiskAccess: Bool = true
     @Published public var isWatching: Bool = false
     @Published public var deniedCount: Int = 0
     @Published public var showFDASheet: Bool = false
 
-    public var treemapRoot: FSNode? { drillStack.last ?? root }
+    public var root: FileNode? { tree.map { FileNode(tree: $0, index: $0.rootIndex) } }
+    public var treemapRoot: FileNode? { drillStack.last ?? root }
 
     private let scanner = FileScanner()
     private let fileWatcher = FileWatcher()
@@ -150,7 +154,7 @@ public final class ScanViewModel: ObservableObject {
         layoutGeneration += 1       // invalidate any in-progress layout
         scanURL = url
         UserDefaults.standard.set(url.path, forKey: "lastScannedPath")
-        root = nil
+        tree = nil
         cells = []
         colorMap = nil
         selectedNode = nil
@@ -172,7 +176,7 @@ public final class ScanViewModel: ObservableObject {
                 case .update(let items, let bytes):
                     self.itemsScanned = items
                     self.bytesFound = bytes
-                case .completed(let node, let denied):
+                case .completed(let scannedTree, let denied):
                     self.isScanning = false
                     self.deniedCount = denied
                     if !self.fdaSheetShownThisLaunch,
@@ -187,24 +191,29 @@ public final class ScanViewModel: ObservableObject {
                     // If the scanned root is a volume mount point, the file total will
                     // always fall short of Finder's "used" figure (APFS snapshots,
                     // purgeable space, excluded/unreadable folders). Make that gap
-                    // visible instead of silently under-reporting. Must run before the
-                    // sort pass below so the synthetic node sorts into place.
-                    Self.appendHiddenSpaceNodeIfNeeded(root: node, scannedURL: url)
+                    // visible instead of silently under-reporting. Produces a NEW tree
+                    // (topology is immutable) with the synthetic child already in its
+                    // sorted place, so no separate sort pass is needed afterward.
+                    let finalTree = Self.appendHiddenSpaceNodeIfNeeded(tree: scannedTree, scannedURL: url) ?? scannedTree
                     if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
-                        var dump = "TREE_COMPLETED total=\(node.size) denied=\(denied)\n"
-                        for c in node.children.sorted(by: { $0.size > $1.size }).prefix(15) {
+                        let rootNode = FileNode(tree: finalTree, index: finalTree.rootIndex)
+                        var dump = "TREE_COMPLETED total=\(rootNode.size) denied=\(denied)\n"
+                        for c in rootNode.children.prefix(15) {
                             dump += "TREE_CHILD \(c.size) \(c.name)\(c.isSynthetic ? " [synthetic]" : "")\n"
                         }
                         FileHandle.standardError.write(dump.data(using: .utf8)!)
                     }
                     self.isComputingLayout = true   // keep spinner until treemap is ready
-                    // Sort + safety-tag the entire tree off-thread before exposing it to the UI.
+                    // Safety-tag the entire tree off-thread before exposing it to the UI.
+                    // (Children are already size-sorted by FileTreeBuilder/the synthetic
+                    // splice above, so unlike the old FSNode path there is no separate
+                    // sort pass to run here.)
                     await Task.detached(priority: .userInitiated) {
-                        Self.sortAllChildren(node: node)
-                        Self.tagSafetyLevels(node: node)
+                        Self.tagSafetyLevels(tree: finalTree)
                     }.value
-                    self.root = node
-                    let map = ExtensionColorMap(root: node)
+                    self.tree = finalTree
+                    let rootNode = FileNode(tree: finalTree, index: finalTree.rootIndex)
+                    let map = ExtensionColorMap(root: rootNode)
                     self.colorMap = map
                     await self.recomputeLayout()
                     // isComputingLayout set to false inside recomputeLayout
@@ -215,18 +224,18 @@ public final class ScanViewModel: ObservableObject {
                     }
 
                     // Extension summaries: potentially millions of nodes — run off main actor
-                    self.extensionTask = Task.detached(priority: .userInitiated) { [node, map, weak self] in
-                        let summaries = Self.buildExtensionSummaries(root: node, map: map)
+                    self.extensionTask = Task.detached(priority: .userInitiated) { [finalTree, map, weak self] in
+                        let summaries = Self.buildExtensionSummaries(tree: finalTree, map: map)
                         guard !Task.isCancelled else { return }
                         let vm = self
                         await MainActor.run { vm?.extensionSummaries = summaries }
                     }
                     // Duplicate detection: lower priority, also off main actor
-                    self.duplicateTask = Task.detached(priority: .utility) { [node, weak self] in
+                    self.duplicateTask = Task.detached(priority: .utility) { [finalTree, weak self] in
                         let detector = DuplicateDetector()
-                        await detector.detect(in: node)
+                        await detector.detect(in: finalTree)
                         guard !Task.isCancelled else { return }
-                        let groups = Self.buildDuplicateGroups(root: node)
+                        let groups = Self.buildDuplicateGroups(tree: finalTree)
                         guard !Task.isCancelled else { return }
                         let vm = self
                         await MainActor.run {
@@ -281,40 +290,37 @@ public final class ScanViewModel: ObservableObject {
         }
     }
 
+    // TODO(phase4): incremental splice refresh.
+    //
+    // `FileTree`'s topology (parent/child arrays) is immutable for the life
+    // of one instance (that immutability is exactly what makes the flat
+    // arena cheap), so the old in-place FSNode mutation this method used to
+    // do (find the live node, patch its children/sizes) can no longer work
+    // directly against the live tree. The intended replacement (see the
+    // Phase 2 plan) is: for each changed directory, look up its index via a
+    // path->index map, re-scan just that directory into a fresh FSNode
+    // subtree (reusing `refreshDirectory`/`scanSubtree` below, which already
+    // do exactly this kind of on-disk rescan), convert it with
+    // `FileTreeBuilder`, and splice the result into a NEW `FileTree` that
+    // shares every untouched record/edge with the old one.
+    //
+    // That splice is a meaningful chunk of work on its own, so for this
+    // migration the interim (explicitly allowed by the plan) is simpler and
+    // still correct: any filesystem change under the watched root triggers a
+    // full rescan of the currently-scanned root, exactly like the "Move to
+    // Trash" actions elsewhere in the app already do after a delete. The
+    // FSNode-based helpers below (refreshDirectory/scanSubtree/bubbleUpSizes/
+    // findNode/firstNode) are kept exactly as they were — unused by this
+    // method for now, but still exercised directly by ScanRefreshTests /
+    // HiddenSpaceTests, and ready to be reused as the per-directory rescan
+    // step of the real splice in Phase 4.
     private func handleFileSystemChanges(_ paths: [String]) async {
-        guard let root else { return }
-
-        // Collect the unique directory paths that changed
-        var dirPaths = Set<String>()
-        for path in paths {
-            var isDir: ObjCBool = false
-            if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
-                dirPaths.insert(path)
-            } else {
-                dirPaths.insert((path as NSString).deletingLastPathComponent)
-            }
+        guard let scanURL else { return }
+        if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
+            let line = "REFRESH full-rescan changedPaths=\(paths.count) root=\(scanURL.path)\n"
+            FileHandle.standardError.write(line.data(using: .utf8)!)
         }
-
-        var needsLayout = false
-        for dirPath in dirPaths {
-            guard let node = Self.findNode(path: dirPath, in: root) else { continue }
-            let sizeBefore = node.size
-            let changed = await Task.detached(priority: .userInitiated) {
-                Self.refreshDirectory(node: node)
-            }.value
-            if changed {
-                Self.bubbleUpSizes(from: node)
-                needsLayout = true
-            }
-            if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
-                let line = "REFRESH changed=\(changed) nodeBefore=\(sizeBefore) nodeAfter=\(node.size) rootAfter=\(root.size) path=\(dirPath)\n"
-                FileHandle.standardError.write(line.data(using: .utf8)!)
-            }
-        }
-
-        if needsLayout {
-            await recomputeLayout()
-        }
+        scan(url: scanURL)
     }
 
     // Walk the tree by path components to find the FSNode for a given path.
@@ -547,32 +553,30 @@ public final class ScanViewModel: ObservableObject {
         return hidden >= oneGB ? hidden : nil
     }
 
-    // When the scanned URL is itself a volume's mount point, appends a synthetic
-    // "Hidden & Unreadable Space" child representing the portion of the volume's
-    // used space that the scanner could never account for. No-op for non-volume
-    // scans (e.g. scanning a subfolder) or when the gap is negligible.
-    private nonisolated static func appendHiddenSpaceNodeIfNeeded(root: FSNode, scannedURL: URL) {
+    // When the scanned URL is itself a volume's mount point, returns a NEW
+    // tree with a synthetic "Hidden & Unreadable Space" child representing
+    // the portion of the volume's used space the scanner could never
+    // account for (nil for non-volume scans, e.g. scanning a subfolder, or
+    // when the gap is negligible). Topology is immutable on `FileTree`, so
+    // this can't append in place the way the old FSNode version did.
+    private nonisolated static func appendHiddenSpaceNodeIfNeeded(tree: FileTree, scannedURL: URL) -> FileTree? {
         guard let values = try? scannedURL.resourceValues(forKeys: [.volumeURLKey]),
               let volumeURL = values.volume,
               volumeURL.standardizedFileURL.path == scannedURL.standardizedFileURL.path
-        else { return }
+        else { return nil }
 
         guard let volumeValues = try? scannedURL.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey]),
               let totalCapacity = volumeValues.volumeTotalCapacity,
               let availableCapacity = volumeValues.volumeAvailableCapacity
-        else { return }
+        else { return nil }
 
         guard let hidden = hiddenSpaceBytes(
             volumeTotal: Int64(totalCapacity),
             volumeAvailable: Int64(availableCapacity),
-            scannedTotal: root.size
-        ) else { return }
+            scannedTotal: tree.records[tree.rootIndex].size
+        ) else { return nil }
 
-        let syntheticURL = scannedURL.appendingPathComponent("#hidden-space")
-        let synthetic = FSNode(url: syntheticURL, name: "Hidden & Unreadable Space", isDirectory: false, size: hidden, fileExtension: "", parent: root)
-        synthetic.isSynthetic = true
-        root.children.append(synthetic)
-        root.size += hidden
+        return tree.appendingSyntheticRootChild(name: "Hidden & Unreadable Space", size: hidden)
     }
 
     // Walk up the parent chain recalculating folder sizes from their children.
@@ -599,7 +603,7 @@ public final class ScanViewModel: ObservableObject {
         }
     }
 
-    public func drillDown(into node: FSNode) {
+    public func drillDown(into node: FileNode) {
         guard node.isDirectory else { return }
         drillStack.append(node)
         Task { await recomputeLayout() }
@@ -611,7 +615,7 @@ public final class ScanViewModel: ObservableObject {
         Task { await recomputeLayout() }
     }
 
-    public func select(_ node: FSNode?) {
+    public func select(_ node: FileNode?) {
         selectedNode = node
     }
 
@@ -625,9 +629,11 @@ public final class ScanViewModel: ObservableObject {
         Task { await recomputeLayout() }
     }
 
-    private nonisolated static func buildDuplicateGroups(root: FSNode) -> [[FSNode]] {
-        var all: [FSNode] = []
-        collectAll(node: root, into: &all)
+    // Whole-tree aggregate: a flat loop over `tree.records` reaches every
+    // node without recursion, since the array already covers the entire
+    // tree regardless of hierarchy.
+    private nonisolated static func buildDuplicateGroups(tree: FileTree) -> [[FileNode]] {
+        let all = (0..<tree.records.count).map { FileNode(tree: tree, index: $0) }
         let grouped = Dictionary(grouping: all.filter { $0.duplicateGroupID != nil }) { $0.duplicateGroupID! }
         return grouped.values
             .filter { $0.count > 1 }
@@ -647,10 +653,13 @@ public final class ScanViewModel: ObservableObject {
         public let percentage: Double
     }
 
-    private nonisolated static func buildExtensionSummaries(root: FSNode, map: ExtensionColorMap) -> [ExtensionSummary] {
+    private nonisolated static func buildExtensionSummaries(tree: FileTree, map: ExtensionColorMap) -> [ExtensionSummary] {
         var groups: [String: (count: Int, size: Int64)] = [:]
-        collectExtensions(node: root, into: &groups)
-        let total = Double(root.size)
+        for record in tree.records where !record.isDirectory {
+            groups[record.fileExtension, default: (0, 0)].count += 1
+            groups[record.fileExtension, default: (0, 0)].size  += record.size
+        }
+        let total = Double(tree.records[tree.rootIndex].size)
         return groups.map { ext, stats in
             ExtensionSummary(
                 id: ext,
@@ -680,56 +689,26 @@ public final class ScanViewModel: ObservableObject {
         self.isComputingLayout = false
     }
 
-    private nonisolated static func tagSafetyLevels(node: FSNode) {
-        var stack: [FSNode] = [node]
-        while !stack.isEmpty {
-            let n = stack.removeLast()
-            n.safetyLevel = SafetyAnalyzer.level(for: n)
-            stack.append(contentsOf: n.children)
-        }
-    }
-
-    private nonisolated static func sortAllChildren(node: FSNode) {
-        var stack: [FSNode] = [node]
-        while !stack.isEmpty {
-            let n = stack.removeLast()
-            guard !n.children.isEmpty else { continue }
-            n.children.sort { $0.size > $1.size }
-            stack.append(contentsOf: n.children)
-        }
-    }
-
-    private nonisolated static func collectAll(node: FSNode, into list: inout [FSNode]) {
-        var stack = [node]
-        while !stack.isEmpty {
-            let n = stack.removeLast()
-            list.append(n)
-            stack.append(contentsOf: n.children)
-        }
-    }
-
-    private nonisolated static func collectExtensions(node: FSNode, into groups: inout [String: (count: Int, size: Int64)]) {
-        var stack = [node]
-        while !stack.isEmpty {
-            let n = stack.removeLast()
-            if !n.isDirectory {
-                groups[n.fileExtension, default: (0, 0)].count += 1
-                groups[n.fileExtension, default: (0, 0)].size  += n.size
-            }
-            stack.append(contentsOf: n.children)
+    // Flat loop over every index — order doesn't matter (each node's safety
+    // level only depends on its own reconstructed path/name, both already
+    // fully populated by the builder before this runs).
+    private nonisolated static func tagSafetyLevels(tree: FileTree) {
+        for index in 0..<tree.records.count {
+            let node = FileNode(tree: tree, index: index)
+            tree.setSafety(SafetyAnalyzer.level(for: node), at: index)
         }
     }
 
     public func exportCSV() {
-        guard let root else { return }
+        guard let tree else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.commaSeparatedText]
-        panel.nameFieldStringValue = "\(root.name)-disk-usage.csv"
+        panel.nameFieldStringValue = "\(tree.records[tree.rootIndex].name)-disk-usage.csv"
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        Task.detached(priority: .utility) { [root] in
+        Task.detached(priority: .utility) { [tree] in
             var lines = ["Path,Size (bytes),Human Size,Type,Duplicate Group"]
-            Self.appendCSV(node: root, to: &lines)
+            Self.appendCSV(tree: tree, to: &lines)
             let csv = lines.joined(separator: "\n") + "\n"
             do {
                 try csv.write(to: url, atomically: true, encoding: .utf8)
@@ -743,19 +722,18 @@ public final class ScanViewModel: ObservableObject {
         "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
     }
 
-    private nonisolated static func appendCSV(node: FSNode, to lines: inout [String]) {
-        var stack: [FSNode] = [node]
-        while let current = stack.popLast() {
-            let type = current.isDirectory ? "directory" : current.fileExtension
-            let group = current.duplicateGroupID?.uuidString ?? ""
+    private nonisolated static func appendCSV(tree: FileTree, to lines: inout [String]) {
+        for index in 0..<tree.records.count {
+            let record = tree.records[index]
+            let type = record.isDirectory ? "directory" : record.fileExtension
+            let group = record.duplicateGroupID?.uuidString ?? ""
             lines.append([
-                csvEscape(current.url.path),
-                "\(current.size)",
-                csvEscape(ByteFormatter.string(from: current.size)),
+                csvEscape(tree.path(of: index)),
+                "\(record.size)",
+                csvEscape(ByteFormatter.string(from: record.size)),
                 csvEscape(type),
                 csvEscape(group)
             ].joined(separator: ","))
-            stack.append(contentsOf: current.children)
         }
     }
 }

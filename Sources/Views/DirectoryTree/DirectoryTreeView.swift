@@ -84,7 +84,7 @@ private struct ScanningPlaceholder: View {
 }
 
 private struct NodeRow: View {
-    let node: FSNode
+    let node: FileNode
     let isSelected: Bool
 
     var body: some View {

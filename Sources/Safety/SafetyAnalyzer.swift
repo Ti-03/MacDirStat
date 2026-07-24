@@ -1,6 +1,6 @@
 import Foundation
 
-public enum SafetyLevel: Equatable {
+public enum SafetyLevel: Equatable, Sendable {
     case safe     // Regeneratable artifact — confident it's okay to delete
     case caution  // Unknown or user data — review before deleting
     case danger   // System or critical app data — do not delete
@@ -15,13 +15,24 @@ public struct SafetyAnalyzer {
 
     // MARK: - Bulk tagging (no string allocations — just enum assignment)
 
+    // `FSNode` overload: used by the scanner-internal build step and by the
+    // FSNode-based live-refresh helpers in ScanViewModel (refreshDirectory /
+    // scanSubtree), which still operate on freshly-scanned FSNode subtrees.
     public static func level(for node: FSNode) -> SafetyLevel {
+        level(path: node.url.path, name: node.name, isSynthetic: node.isSynthetic)
+    }
+
+    // `FileNode` overload: used by the app-facing FileTree tagging pass and
+    // by every view that reads `safetyLevel`.
+    public static func level(for node: FileNode) -> SafetyLevel {
+        level(path: node.url.path, name: node.name, isSynthetic: node.isSynthetic)
+    }
+
+    private static func level(path: String, name: String, isSynthetic: Bool) -> SafetyLevel {
         // Synthetic nodes (e.g. the hidden-space reconciliation entry) don't point
         // at a real, deletable file — always treat them as the most protective
         // level so nothing ever attempts to trash/move them.
-        if node.isSynthetic { return .danger }
-        let path = node.url.path
-        let name = node.name
+        if isSynthetic { return .danger }
         if isDanger(path: path, name: name) { return .danger }
         if isSafe(path: path, name: name)   { return .safe   }
         return .caution
@@ -30,11 +41,17 @@ public struct SafetyAnalyzer {
     // MARK: - On-demand reason (called only when UI needs to display it)
 
     public static func reason(for node: FSNode) -> String? {
-        if node.isSynthetic {
+        reason(path: node.url.path, name: node.name, isSynthetic: node.isSynthetic)
+    }
+
+    public static func reason(for node: FileNode) -> String? {
+        reason(path: node.url.path, name: node.name, isSynthetic: node.isSynthetic)
+    }
+
+    private static func reason(path: String, name: String, isSynthetic: Bool) -> String? {
+        if isSynthetic {
             return "Represents space macOS reports as used but the scanner can't read or enumerate (snapshots, purgeable space, protected folders)"
         }
-        let path = node.url.path
-        let name = node.name
         return dangerReason(path: path, name: name)
             ?? safeReason(path: path, name: name)
     }

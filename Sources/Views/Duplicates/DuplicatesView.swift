@@ -45,7 +45,7 @@ struct DuplicatesView: View {
     // MARK: - Summary bar
 
     @ViewBuilder
-    private func summaryBar(groups: [[FSNode]]) -> some View {
+    private func summaryBar(groups: [[FileNode]]) -> some View {
         let totalWasted = groups.reduce(Int64(0)) { $0 + $1[0].size * Int64($1.count - 1) }
         let totalFiles  = groups.reduce(0) { $0 + $1.count - 1 }
 
@@ -73,7 +73,7 @@ struct DuplicatesView: View {
 
     // MARK: - Delete helpers
 
-    private func deleteAll(groups: [[FSNode]]) {
+    private func deleteAll(groups: [[FileNode]]) {
         guard let rootURL = vm.root?.url else { return }
         var deleted = false
         for group in groups {
@@ -86,7 +86,7 @@ struct DuplicatesView: View {
         if deleted { vm.scan(url: rootURL) }
     }
 
-    private func deleteGroup(_ group: [FSNode]) {
+    private func deleteGroup(_ group: [FileNode]) {
         guard let rootURL = vm.root?.url else { return }
         var deleted = false
         for node in group.dropFirst() {
@@ -97,7 +97,7 @@ struct DuplicatesView: View {
         if deleted { vm.scan(url: rootURL) }
     }
 
-    private func deleteNode(_ node: FSNode) {
+    private func deleteNode(_ node: FileNode) {
         guard let rootURL = vm.root?.url else { return }
         if (try? FileManager.default.trashItem(at: node.url, resultingItemURL: nil)) != nil {
             vm.scan(url: rootURL)
@@ -109,11 +109,11 @@ struct DuplicatesView: View {
 
 private struct GroupSection: View {
     let index: Int
-    let group: [FSNode]
+    let group: [FileNode]
     let isExpanded: Bool
     let onToggle: () -> Void
     let onDeleteGroup: () -> Void
-    let onDeleteNode: (FSNode) -> Void
+    let onDeleteNode: (FileNode) -> Void
 
     private var wasted: Int64 { group[0].size * Int64(group.count - 1) }
 
@@ -189,7 +189,7 @@ private struct GroupSection: View {
 // MARK: - File row
 
 private struct FileRow: View {
-    let node: FSNode
+    let node: FileNode
     let isKeep: Bool
     let onDelete: () -> Void
     @State private var isHovered = false

@@ -158,7 +158,7 @@ struct TreemapView: View {
     @ViewBuilder
     private func contextMenuContent() -> some View {
         let c = chartCenter
-        let node: FSNode? = hoveredCell?.node
+        let node: FileNode? = hoveredCell?.node
             ?? (c.x > 0 ? TreemapRenderer.cell(at: cursorPos, center: c, in: vm.cells)?.node : nil)
             ?? vm.selectedNode
 
@@ -217,7 +217,7 @@ struct TreemapView: View {
 
     // MARK: - Center label
 
-    private func centerLabel(for root: FSNode) -> some View {
+    private func centerLabel(for root: FileNode) -> some View {
         VStack(spacing: 4) {
             if !vm.drillStack.isEmpty {
                 Image(systemName: "chevron.backward.circle.fill")
@@ -304,7 +304,7 @@ struct TreemapView: View {
 // MARK: - Hover tooltip
 
 private struct HoverTooltip: View {
-    let node: FSNode
+    let node: FileNode
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
