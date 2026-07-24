@@ -95,11 +95,20 @@ public struct TreemapLayout {
 
     // ── Color assignment ─────────────────────────────────────────────────────
 
+    static func directoryHue(for name: String) -> Double {
+        let hash = name.utf8.reduce(UInt32(5381)) { ($0 &<< 5) &+ $0 &+ UInt32($1) }
+        return Double(hash % 360) / 360.0
+    }
+
     private static func color(for node: FSNode, depth: Int, colorMap: ExtensionColorMap) -> Color {
+        if node.isSynthetic {
+            // Distinct muted gray so the hidden-space reconciliation node reads as
+            // "not a real file" at a glance, rather than blending into the chart.
+            return Color(hue: 0, saturation: 0, brightness: 0.35)
+        }
         if node.isDirectory {
             // Directories: muted tinted containers — hue from name hash, low saturation
-            let hash = abs(node.name.hashValue) % 360
-            let hue  = Double(hash) / 360.0
+            let hue  = directoryHue(for: node.name)
             let fade = Double(depth) * 0.05
             return Color(hue: hue,
                          saturation: max(0.12, 0.28 - fade),

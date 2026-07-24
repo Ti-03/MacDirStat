@@ -26,6 +26,7 @@ private final class ProgressCounter: @unchecked Sendable {
     private var lock = os_unfair_lock()
     private(set) var items: Int = 0
     private(set) var bytes: Int64 = 0
+    private(set) var denied: Int = 0
 
     func add(items: Int, bytes: Int64) {
         os_unfair_lock_lock(&lock)
@@ -34,11 +35,66 @@ private final class ProgressCounter: @unchecked Sendable {
         os_unfair_lock_unlock(&lock)
     }
 
+    func addDenied() {
+        os_unfair_lock_lock(&lock)
+        self.denied += 1
+        os_unfair_lock_unlock(&lock)
+    }
+
     var snapshot: (items: Int, bytes: Int64) {
         os_unfair_lock_lock(&lock)
         let result = (items, bytes)
         os_unfair_lock_unlock(&lock)
         return result
+    }
+
+    var deniedCount: Int {
+        os_unfair_lock_lock(&lock)
+        let result = denied
+        os_unfair_lock_unlock(&lock)
+        return result
+    }
+}
+
+// Thread-safe counter bounding the number of concurrently-spawned subtree tasks.
+// Prevents unbounded task-group fan-out (and the associated flood of open dirfds)
+// on very deep/wide directory trees.
+private final class TaskBudget: @unchecked Sendable {
+    private var lock = os_unfair_lock()
+    private var remaining: Int
+
+    init(limit: Int) {
+        self.remaining = limit
+    }
+
+    // Returns true if a slot was reserved (caller must call release() when done).
+    func tryAcquire() -> Bool {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        guard remaining > 0 else { return false }
+        remaining -= 1
+        return true
+    }
+
+    func release() {
+        os_unfair_lock_lock(&lock)
+        remaining += 1
+        os_unfair_lock_unlock(&lock)
+    }
+}
+
+// Snapshot of scan-time settings, read once per scan (not per directory) to avoid
+// UserDefaults overhead on the hot path.
+struct ScanConfig: Sendable {
+    let excludedNames: Set<String>
+    let showHiddenFiles: Bool
+
+    static func loadFromUserDefaults() -> ScanConfig {
+        let rawExcluded = UserDefaults.standard.string(forKey: "excludedFolderNames")
+            ?? ".git,node_modules,DerivedData,.Trash"
+        let excludedNames = Set(rawExcluded.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+        let showHiddenFiles = UserDefaults.standard.bool(forKey: "showHiddenFiles")
+        return ScanConfig(excludedNames: excludedNames, showHiddenFiles: showHiddenFiles)
     }
 }
 
@@ -58,6 +114,8 @@ public actor FileScanner {
         activeTask = Task {
             let counter = ProgressCounter()
             let visited = VisitedSet()
+            let config = ScanConfig.loadFromUserDefaults()
+            let taskBudget = TaskBudget(limit: min(max(4, ProcessInfo.processInfo.activeProcessorCount), 16))
             // Get the root device ID to detect mount points
             var rootStat = stat()
             let rootDev: dev_t? = (stat(url.path, &rootStat) == 0) ? rootStat.st_dev : nil
@@ -72,9 +130,9 @@ public actor FileScanner {
             }
 
             do {
-                let root = try await _buildTree(path: url.path, url: url, parent: nil, rootDev: rootDev, counter: counter, visited: visited)
+                let root = try await _buildTree(path: url.path, url: url, parent: nil, rootDev: rootDev, counter: counter, visited: visited, config: config, taskBudget: taskBudget)
                 progressTask.cancel()
-                continuation.yield(.completed(root: root))
+                continuation.yield(.completed(root: root, deniedCount: counter.deniedCount))
             } catch is CancellationError {
                 progressTask.cancel()
             } catch {
@@ -96,7 +154,9 @@ private func _buildTree(
     parent: FSNode?,
     rootDev: dev_t?,
     counter: ProgressCounter,
-    visited: VisitedSet
+    visited: VisitedSet,
+    config: ScanConfig,
+    taskBudget: TaskBudget
 ) async throws -> FSNode {
     try Task.checkCancellation()
 
@@ -111,7 +171,12 @@ private func _buildTree(
     // Deduplicate directories by (dev, ino) — prevents double-counting paths like
     // /Applications and /System/Volumes/Data/Applications (same inode, different paths).
     if isDir {
-        guard visited.visit(dev: st.st_dev, ino: st.st_ino) else { throw SkipError() }
+        guard visited.visit(dev: st.st_dev, ino: st.st_ino) else {
+            if ProcessInfo.processInfo.environment["MDS_DEBUG_SKIPS"] != nil {
+                FileHandle.standardError.write("DEDUP_SKIP dev=\(st.st_dev) ino=\(st.st_ino) \(path)\n".data(using: .utf8)!)
+            }
+            throw SkipError()
+        }
     }
 
     let name = url.lastPathComponent
@@ -120,24 +185,41 @@ private func _buildTree(
     let node = FSNode(url: url, name: name, isDirectory: isDir, size: 0, fileExtension: ext, parent: parent)
 
     if isDir {
-        let listing = _listDirectory(path: path, url: url, rootDev: rootDev, node: node, counter: counter, visited: visited)
+        let listing = _listDirectory(path: path, url: url, rootDev: rootDev, node: node, counter: counter, visited: visited, config: config)
 
         // Accumulate direct file sizes immediately
         node.size = listing.totalSize
         node.children = listing.children
+        node.isAccessDenied = listing.accessDenied
+        if listing.accessDenied { counter.addDenied() }
 
-        // Recurse into subdirectories in parallel
+        // Recurse into subdirectories, in parallel up to the task budget; beyond
+        // that, recurse inline in the current task to bound total concurrency.
         if !listing.subdirPaths.isEmpty {
             var subdirSize: Int64 = 0
             try await withThrowingTaskGroup(of: FSNode?.self) { group in
                 for (subPath, subURL) in listing.subdirPaths {
-                    group.addTask {
-                        // Propagate cancellation; silently skip symlinks / unreadable entries.
+                    if taskBudget.tryAcquire() {
+                        group.addTask {
+                            defer { taskBudget.release() }
+                            // Propagate cancellation; silently skip symlinks / unreadable entries.
+                            try Task.checkCancellation()
+                            do {
+                                return try await _buildTree(path: subPath, url: subURL, parent: node, rootDev: rootDev, counter: counter, visited: visited, config: config, taskBudget: taskBudget)
+                            } catch is SkipError {
+                                return nil
+                            }
+                        }
+                    } else {
+                        // Budget exhausted: recurse inline (no new task spawned) to
+                        // bound concurrency without blocking on any lock or semaphore.
                         try Task.checkCancellation()
                         do {
-                            return try await _buildTree(path: subPath, url: subURL, parent: node, rootDev: rootDev, counter: counter, visited: visited)
+                            let child = try await _buildTree(path: subPath, url: subURL, parent: node, rootDev: rootDev, counter: counter, visited: visited, config: config, taskBudget: taskBudget)
+                            node.children.append(child)
+                            subdirSize += child.size
                         } catch is SkipError {
-                            return nil
+                            // skip
                         }
                     }
                 }
@@ -171,18 +253,20 @@ private struct DirectoryContents {
     var subdirPaths: [(String, URL)]  // subdirectory (path, url) pairs for parallel recursion
     var totalSize: Int64         // sum of immediate file sizes
     var itemCount: Int           // count of items processed here
+    var accessDenied: Bool = false  // true when opendir failed due to permissions (EACCES/EPERM)
 }
 
-private func _listDirectory(path: String, url: URL, rootDev: dev_t?, node: FSNode, counter: ProgressCounter, visited: VisitedSet) -> DirectoryContents {
+private func _listDirectory(path: String, url: URL, rootDev: dev_t?, node: FSNode, counter: ProgressCounter, visited: VisitedSet, config: ScanConfig) -> DirectoryContents {
     var result = DirectoryContents(children: [], subdirPaths: [], totalSize: 0, itemCount: 0)
 
-    guard let dir = opendir(path) else { return result }
+    guard let dir = opendir(path) else {
+        if errno == EACCES || errno == EPERM {
+            result.accessDenied = true
+        }
+        return result
+    }
     defer { closedir(dir) }
     let directoryFD = dirfd(dir)
-
-    let rawExcluded = UserDefaults.standard.string(forKey: "excludedFolderNames")
-        ?? ".git,node_modules,DerivedData,.Trash"
-    let excludedNames = Set(rawExcluded.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
 
     while let entry = readdir(dir) {
         let nameBytes = entry.pointee.d_name
@@ -191,8 +275,8 @@ private func _listDirectory(path: String, url: URL, rootDev: dev_t?, node: FSNod
             return String(cString: bytes.baseAddress!)
         }
         guard name != "." && name != ".." else { continue }
-        if name.hasPrefix("."), !UserDefaults.standard.bool(forKey: "showHiddenFiles") { continue }
-        if excludedNames.contains(name) { continue }
+        if name.hasPrefix("."), !config.showHiddenFiles { continue }
+        if config.excludedNames.contains(name) { continue }
 
         let childURL = url.appendingPathComponent(name, isDirectory: entry.pointee.d_type == DT_DIR)
         let dtype = entry.pointee.d_type
@@ -213,6 +297,7 @@ private func _listDirectory(path: String, url: URL, rootDev: dev_t?, node: FSNod
                     let allocSize = allocatedSize(st: st, visited: visited)
                     let ext = childURL.pathExtension.lowercased()
                     let fileNode = FSNode(url: childURL, name: name, isDirectory: false, size: allocSize, fileExtension: ext, parent: node)
+                    if st.st_nlink > 1 { fileNode.hardLinkRef = hardLinkRef(of: st) }
                     result.children.append(fileNode)
                     result.totalSize += allocSize
                     result.itemCount += 1
@@ -236,6 +321,7 @@ private func _listDirectory(path: String, url: URL, rootDev: dev_t?, node: FSNod
             let allocSize = allocatedSize(st: st, visited: visited)
             let ext = childURL.pathExtension.lowercased()
             let fileNode = FSNode(url: childURL, name: name, isDirectory: false, size: allocSize, fileExtension: ext, parent: node)
+            if st.st_nlink > 1 { fileNode.hardLinkRef = hardLinkRef(of: st) }
             result.children.append(fileNode)
             result.totalSize += allocSize
             result.itemCount += 1
@@ -245,6 +331,12 @@ private func _listDirectory(path: String, url: URL, rootDev: dev_t?, node: FSNod
     }
 
     return result
+}
+
+// Builds the inode identity for a hardlinked file. dev_t is a signed 32-bit value
+// (can be negative for synthetic filesystems), so use bit-pattern conversion.
+private func hardLinkRef(of st: stat) -> HardLinkRef {
+    HardLinkRef(dev: UInt64(bitPattern: Int64(st.st_dev)), ino: UInt64(st.st_ino))
 }
 
 // Returns the file's allocated disk bytes, deduplicating hardlinks via the visited set.

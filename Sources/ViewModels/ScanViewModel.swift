@@ -20,6 +20,8 @@ public final class ScanViewModel: ObservableObject {
     @Published public var duplicateGroups: [[FSNode]] = []
     @Published public var hasFullDiskAccess: Bool = true
     @Published public var isWatching: Bool = false
+    @Published public var deniedCount: Int = 0
+    @Published public var showFDASheet: Bool = false
 
     public var treemapRoot: FSNode? { drillStack.last ?? root }
 
@@ -34,6 +36,7 @@ public final class ScanViewModel: ObservableObject {
     private var layoutGeneration: Int = 0
     private var securityScopedURL: URL?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
+    private var fdaSheetShownThisLaunch = false
 
     public init() {
         UserDefaults.standard.register(defaults: [
@@ -48,7 +51,21 @@ public final class ScanViewModel: ObservableObject {
         ])
         setupMemoryPressureHandler()
         checkFullDiskAccess()
-        if UserDefaults.standard.bool(forKey: "autoScanLastFolder"),
+
+        // A relaunch triggered from the Full Disk Access flow leaves behind the path
+        // that was being scanned, so the new instance can resume right where the user
+        // left off instead of landing back on the welcome screen.
+        var resumedPendingRescan = false
+        if let pending = UserDefaults.standard.string(forKey: "fdaPendingRescanPath") {
+            UserDefaults.standard.removeObject(forKey: "fdaPendingRescanPath")
+            if FileManager.default.fileExists(atPath: pending) {
+                scan(url: URL(fileURLWithPath: pending))
+                resumedPendingRescan = true
+            }
+        }
+
+        if !resumedPendingRescan,
+           UserDefaults.standard.bool(forKey: "autoScanLastFolder"),
            let path = UserDefaults.standard.string(forKey: "lastScannedPath"),
            FileManager.default.fileExists(atPath: path) {
             scan(url: URL(fileURLWithPath: path))
@@ -63,6 +80,44 @@ public final class ScanViewModel: ObservableObject {
         // TCC.db is only readable when Full Disk Access is granted
         let probe = "/Library/Application Support/com.apple.TCC/TCC.db"
         hasFullDiskAccess = FileManager.default.isReadableFile(atPath: probe)
+    }
+
+    /// Public wrapper so the onboarding sheet can poll for a live permission change
+    /// without exposing the private TCC probe itself.
+    public func recheckFullDiskAccess() {
+        checkFullDiskAccess()
+    }
+
+    /// Pure decision logic for whether the guided Full Disk Access sheet should be
+    /// offered after a scan completes: only when access is actually missing, the scan
+    /// hit blocked folders, and the user hasn't opted out.
+    nonisolated static func shouldOfferFullDiskAccess(deniedCount: Int, hasFullDiskAccess: Bool, suppressed: Bool) -> Bool {
+        !hasFullDiskAccess && deniedCount > 0 && !suppressed
+    }
+
+    /// Relaunches the app so macOS re-evaluates the Full Disk Access grant, and leaves
+    /// a breadcrumb so the new instance automatically resumes the scan the user was on.
+    public func relaunchForFullDiskAccess() {
+        let pathToResume = scanURL?.path ?? UserDefaults.standard.string(forKey: "lastScannedPath")
+        if let pathToResume {
+            UserDefaults.standard.set(pathToResume, forKey: "fdaPendingRescanPath")
+        }
+
+        guard Bundle.main.bundlePath.hasSuffix(".app") else {
+            // Debug binary, not an app bundle — there's nothing to relaunch
+            // programmatically. The developer restarts the process by hand.
+            NSApp.terminate(nil)
+            return
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, _ in
+            // Give the new instance a moment to spawn before this one exits.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                NSApp.terminate(nil)
+            }
+        }
     }
 
     private func setupMemoryPressureHandler() {
@@ -109,6 +164,7 @@ public final class ScanViewModel: ObservableObject {
         bytesFound = 0
         isComputingLayout = false
         errorMessage = nil
+        deniedCount = 0
 
         scanTask = Task {
             for await progress in await scanner.scan(url: url) {
@@ -116,8 +172,31 @@ public final class ScanViewModel: ObservableObject {
                 case .update(let items, let bytes):
                     self.itemsScanned = items
                     self.bytesFound = bytes
-                case .completed(let node):
+                case .completed(let node, let denied):
                     self.isScanning = false
+                    self.deniedCount = denied
+                    if !self.fdaSheetShownThisLaunch,
+                       Self.shouldOfferFullDiskAccess(
+                           deniedCount: denied,
+                           hasFullDiskAccess: self.hasFullDiskAccess,
+                           suppressed: UserDefaults.standard.bool(forKey: "fdaPromptSuppressed")
+                       ) {
+                        self.showFDASheet = true
+                        self.fdaSheetShownThisLaunch = true
+                    }
+                    // If the scanned root is a volume mount point, the file total will
+                    // always fall short of Finder's "used" figure (APFS snapshots,
+                    // purgeable space, excluded/unreadable folders). Make that gap
+                    // visible instead of silently under-reporting. Must run before the
+                    // sort pass below so the synthetic node sorts into place.
+                    Self.appendHiddenSpaceNodeIfNeeded(root: node, scannedURL: url)
+                    if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
+                        var dump = "TREE_COMPLETED total=\(node.size) denied=\(denied)\n"
+                        for c in node.children.sorted(by: { $0.size > $1.size }).prefix(15) {
+                            dump += "TREE_CHILD \(c.size) \(c.name)\(c.isSynthetic ? " [synthetic]" : "")\n"
+                        }
+                        FileHandle.standardError.write(dump.data(using: .utf8)!)
+                    }
                     self.isComputingLayout = true   // keep spinner until treemap is ready
                     // Sort + safety-tag the entire tree off-thread before exposing it to the UI.
                     await Task.detached(priority: .userInitiated) {
@@ -219,12 +298,17 @@ public final class ScanViewModel: ObservableObject {
         var needsLayout = false
         for dirPath in dirPaths {
             guard let node = Self.findNode(path: dirPath, in: root) else { continue }
+            let sizeBefore = node.size
             let changed = await Task.detached(priority: .userInitiated) {
                 Self.refreshDirectory(node: node)
             }.value
             if changed {
                 Self.bubbleUpSizes(from: node)
                 needsLayout = true
+            }
+            if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
+                let line = "REFRESH changed=\(changed) nodeBefore=\(sizeBefore) nodeAfter=\(node.size) rootAfter=\(root.size) path=\(dirPath)\n"
+                FileHandle.standardError.write(line.data(using: .utf8)!)
             }
         }
 
@@ -249,45 +333,130 @@ public final class ScanViewModel: ObservableObject {
         return current
     }
 
+    // Returns the allocated disk size (st_blocks * 512) for a path via lstat, or nil if
+    // the path can't be stat'd or is a symlink.
+    private nonisolated static func lstatInfo(path: String) -> (isDir: Bool, isSymlink: Bool, allocatedSize: Int64, linkCount: Int, ref: HardLinkRef)? {
+        var st = stat()
+        guard lstat(path, &st) == 0 else { return nil }
+        let mode = st.st_mode & S_IFMT
+        let isSymlink = mode == S_IFLNK
+        let isDir = mode == S_IFDIR
+        let allocatedSize = Int64(st.st_blocks) * 512
+        let ref = HardLinkRef(dev: UInt64(bitPattern: Int64(st.st_dev)), ino: UInt64(st.st_ino))
+        return (isDir, isSymlink, allocatedSize, Int(st.st_nlink), ref)
+    }
+
+    // Climbs the parent chain to the tree's root node.
+    private nonisolated static func rootNode(of node: FSNode) -> FSNode {
+        var current = node
+        while let parent = current.parent { current = parent }
+        return current
+    }
+
+    // Iterative whole-tree search for a node representing the given inode.
+    // Only invoked when hardlinked entries (st_nlink > 1) appear or disappear,
+    // which is rare per refresh, so the O(tree) walk is acceptable.
+    private nonisolated static func firstNode(withRef ref: HardLinkRef, in root: FSNode, requireZeroSize: Bool = false) -> FSNode? {
+        var stack = [root]
+        while let n = stack.popLast() {
+            if n.hardLinkRef == ref, !requireZeroSize || n.size == 0 { return n }
+            stack.append(contentsOf: n.children)
+        }
+        return nil
+    }
+
+    // Parses the excludedFolderNames default the same way FileScanner does.
+    private nonisolated static func parseExcludedNames() -> Set<String> {
+        let raw = UserDefaults.standard.string(forKey: "excludedFolderNames")
+            ?? ".git,node_modules,DerivedData,.Trash"
+        return Set(raw.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+    }
+
     // Re-stat the directory on disk and update children to match.
     // Returns true if anything changed (additions/removals/size changes).
     @discardableResult
-    private nonisolated static func refreshDirectory(node: FSNode) -> Bool {
+    nonisolated static func refreshDirectory(node: FSNode) -> Bool {
         guard node.isDirectory else { return false }
         let fm = FileManager.default
+        let showHiddenFiles = UserDefaults.standard.bool(forKey: "showHiddenFiles")
+        let excludedNames = parseExcludedNames()
         guard let entries = try? fm.contentsOfDirectory(
             at: node.url,
-            includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey, .isSymbolicLinkKey],
-            options: [.skipsHiddenFiles]
+            includingPropertiesForKeys: nil,
+            options: showHiddenFiles ? [] : [.skipsHiddenFiles]
         ) else { return false }
 
-        let onDisk = Dictionary(uniqueKeysWithValues: entries.map { ($0.lastPathComponent, $0) })
+        // Filter out excluded folder names and symlinks up front, so both the
+        // removal pass and the add/update pass agree on what's "on disk".
+        var onDisk: [String: (url: URL, info: (isDir: Bool, isSymlink: Bool, allocatedSize: Int64, linkCount: Int, ref: HardLinkRef))] = [:]
+        for url in entries {
+            let name = url.lastPathComponent
+            if excludedNames.contains(name) { continue }
+            guard let info = lstatInfo(path: url.path) else { continue }
+            if info.isSymlink { continue }
+            onDisk[name] = (url, info)
+        }
+
         var changed = false
 
-        // Remove children that no longer exist
+        // Remove children that no longer exist on disk (or are now excluded/symlinks),
+        // but never remove synthetic nodes (e.g. the "Hidden & Unreadable Space"
+        // reconciliation entry), which never correspond to a real path.
+        let removedSizeCarriers = node.children.filter {
+            !$0.isSynthetic && !onDisk.keys.contains($0.name) && $0.hardLinkRef != nil && $0.size > 0
+        }
         let before = node.children.count
-        node.children.removeAll { !onDisk.keys.contains($0.name) }
+        node.children.removeAll { !$0.isSynthetic && !onDisk.keys.contains($0.name) }
         if node.children.count != before { changed = true }
 
+        // If a removed entry carried the representative size for a hardlinked inode
+        // that still exists via other links, promote a surviving 0-size link
+        // (anywhere in the tree) to carry the size, or the bytes vanish forever.
+        for removed in removedSizeCarriers {
+            guard let ref = removed.hardLinkRef else { continue }
+            let root = rootNode(of: node)
+            guard let survivor = firstNode(withRef: ref, in: root, requireZeroSize: true),
+                  let survivorInfo = lstatInfo(path: survivor.url.path), !survivorInfo.isDir
+            else { continue }
+            survivor.size = survivorInfo.allocatedSize
+            bubbleUpSizes(from: survivor.parent ?? survivor)
+            changed = true
+        }
+
         // Add or update children
-        for (name, url) in onDisk {
+        for (name, entry) in onDisk {
+            let (url, info) = entry
             if let existing = node.children.first(where: { $0.name == name }) {
                 // Update size for files (directories update via recursive bubble)
-                if !existing.isDirectory,
-                   let attrs = try? url.resourceValues(forKeys: [.fileSizeKey]),
-                   let newSize = attrs.fileSize.map(Int64.init) {
+                if !existing.isDirectory {
+                    if info.linkCount > 1 && existing.hardLinkRef == nil { existing.hardLinkRef = info.ref }
+                    // A 0-byte node for a multi-link inode is a hardlink the initial scan
+                    // already counted elsewhere — re-statting it would double-count.
+                    if info.linkCount > 1 && existing.size == 0 { continue }
+                    let newSize = info.allocatedSize
                     if existing.size != newSize {
                         existing.size = newSize
                         changed = true
                     }
                 }
+            } else if info.isDir {
+                // New directory — scan its whole subtree so it isn't left as a 0-byte leaf.
+                var seenRefs = Set<HardLinkRef>()
+                let child = scanSubtree(url: url, parent: node, showHiddenFiles: showHiddenFiles, excludedNames: excludedNames, treeRoot: rootNode(of: node), seenRefs: &seenRefs)
+                node.children.append(child)
+                changed = true
             } else {
-                // New entry — create a minimal FSNode
-                let attrs = try? url.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
-                let isDir = attrs?.isDirectory ?? false
-                let size = (attrs?.fileSize).map(Int64.init) ?? 0
-                let ext = isDir ? "" : url.pathExtension.lowercased()
-                let child = FSNode(url: url, name: name, isDirectory: isDir, size: size, fileExtension: ext, parent: node)
+                // New file. A new name for an inode the tree already accounts for
+                // (a hardlink created after the scan) must contribute 0 bytes.
+                let ext = url.pathExtension.lowercased()
+                var size = info.allocatedSize
+                var linkRef: HardLinkRef?
+                if info.linkCount > 1 {
+                    linkRef = info.ref
+                    if firstNode(withRef: info.ref, in: rootNode(of: node)) != nil { size = 0 }
+                }
+                let child = FSNode(url: url, name: name, isDirectory: false, size: size, fileExtension: ext, parent: node)
+                child.hardLinkRef = linkRef
                 child.safetyLevel = SafetyAnalyzer.level(for: child)
                 node.children.append(child)
                 changed = true
@@ -298,6 +467,112 @@ public final class ScanViewModel: ObservableObject {
             node.children.sort { $0.size > $1.size }
         }
         return changed
+    }
+
+    // Synchronously walks a newly-discovered directory subtree, applying the same rules
+    // as the initial scan: skip symlinks, skip hidden files unless showHiddenFiles, skip
+    // excludedNames, allocated sizes via lstat, directory size = sum of children.
+    private nonisolated static func scanSubtree(
+        url: URL,
+        parent: FSNode?,
+        showHiddenFiles: Bool,
+        excludedNames: Set<String>,
+        treeRoot: FSNode?,
+        seenRefs: inout Set<HardLinkRef>
+    ) -> FSNode {
+        let name = url.lastPathComponent
+        guard let info = lstatInfo(path: url.path), info.isDir else {
+            // Not actually a directory (or vanished) — return an empty leaf; caller only
+            // invokes this when it already believes the entry is a directory.
+            return FSNode(url: url, name: name, isDirectory: false, size: 0, fileExtension: url.pathExtension.lowercased(), parent: parent)
+        }
+
+        let node = FSNode(url: url, name: name, isDirectory: true, size: 0, fileExtension: "", parent: parent)
+        node.safetyLevel = SafetyAnalyzer.level(for: node)
+
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: nil,
+            options: showHiddenFiles ? [] : [.skipsHiddenFiles]
+        ) else { return node }
+
+        var children: [FSNode] = []
+        var totalSize: Int64 = 0
+        for childURL in entries {
+            let childName = childURL.lastPathComponent
+            if excludedNames.contains(childName) { continue }
+            guard let childInfo = lstatInfo(path: childURL.path) else { continue }
+            if childInfo.isSymlink { continue }
+
+            let child: FSNode
+            if childInfo.isDir {
+                child = scanSubtree(url: childURL, parent: node, showHiddenFiles: showHiddenFiles, excludedNames: excludedNames, treeRoot: treeRoot, seenRefs: &seenRefs)
+            } else {
+                let ext = childURL.pathExtension.lowercased()
+                var size = childInfo.allocatedSize
+                var linkRef: HardLinkRef?
+                if childInfo.linkCount > 1 {
+                    linkRef = childInfo.ref
+                    if seenRefs.contains(childInfo.ref) {
+                        size = 0
+                    } else {
+                        seenRefs.insert(childInfo.ref)
+                        if let treeRoot, firstNode(withRef: childInfo.ref, in: treeRoot) != nil { size = 0 }
+                    }
+                }
+                child = FSNode(url: childURL, name: childName, isDirectory: false, size: size, fileExtension: ext, parent: node)
+                child.hardLinkRef = linkRef
+                child.safetyLevel = SafetyAnalyzer.level(for: child)
+            }
+            children.append(child)
+            totalSize += child.size
+        }
+
+        children.sort { $0.size > $1.size }
+        node.children = children
+        node.size = totalSize
+        return node
+    }
+
+    // Computes the gap between what the volume reports as used (total - available)
+    // and what the scanner actually accounted for. On APFS volumes this gap is
+    // never zero: snapshots, purgeable space, and unreadable/excluded areas all
+    // count toward "used" without ever appearing as a scannable file. Returns nil
+    // when inputs are invalid or the gap is small enough to be measurement noise.
+    nonisolated static func hiddenSpaceBytes(volumeTotal: Int64, volumeAvailable: Int64, scannedTotal: Int64) -> Int64? {
+        guard volumeTotal > 0 else { return nil }
+        let hidden = max(0, volumeTotal - volumeAvailable - scannedTotal)
+        let oneGB: Int64 = 1_000_000_000
+        return hidden >= oneGB ? hidden : nil
+    }
+
+    // When the scanned URL is itself a volume's mount point, appends a synthetic
+    // "Hidden & Unreadable Space" child representing the portion of the volume's
+    // used space that the scanner could never account for. No-op for non-volume
+    // scans (e.g. scanning a subfolder) or when the gap is negligible.
+    private nonisolated static func appendHiddenSpaceNodeIfNeeded(root: FSNode, scannedURL: URL) {
+        guard let values = try? scannedURL.resourceValues(forKeys: [.volumeURLKey]),
+              let volumeURL = values.volume,
+              volumeURL.standardizedFileURL.path == scannedURL.standardizedFileURL.path
+        else { return }
+
+        guard let volumeValues = try? scannedURL.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey]),
+              let totalCapacity = volumeValues.volumeTotalCapacity,
+              let availableCapacity = volumeValues.volumeAvailableCapacity
+        else { return }
+
+        guard let hidden = hiddenSpaceBytes(
+            volumeTotal: Int64(totalCapacity),
+            volumeAvailable: Int64(availableCapacity),
+            scannedTotal: root.size
+        ) else { return }
+
+        let syntheticURL = scannedURL.appendingPathComponent("#hidden-space")
+        let synthetic = FSNode(url: syntheticURL, name: "Hidden & Unreadable Space", isDirectory: false, size: hidden, fileExtension: "", parent: root)
+        synthetic.isSynthetic = true
+        root.children.append(synthetic)
+        root.size += hidden
     }
 
     // Walk up the parent chain recalculating folder sizes from their children.

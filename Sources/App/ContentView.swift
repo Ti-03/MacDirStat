@@ -110,6 +110,9 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .exportCSV)) { _ in
             vm.exportCSV()
         }
+        .sheet(isPresented: $vm.showFDASheet) {
+            FullDiskAccessSheet()
+        }
     }
 
     // MARK: - Tab picker
@@ -190,8 +193,10 @@ struct ContentView: View {
     @ViewBuilder
     private var detailContent: some View {
         VStack(spacing: 0) {
-            if !vm.hasFullDiskAccess {
-                FullDiskAccessBanner()
+            if !vm.hasFullDiskAccess || (vm.deniedCount > 0 && !vm.isScanning) {
+                FullDiskAccessBanner(hasFullDiskAccess: vm.hasFullDiskAccess, deniedCount: vm.deniedCount) {
+                    vm.showFDASheet = true
+                }
             }
             if vm.root == nil && !vm.isScanning && !vm.isComputingLayout {
                 WelcomeView()
@@ -374,6 +379,20 @@ private struct FolderTitleView: View {
 // MARK: - Full Disk Access banner
 
 private struct FullDiskAccessBanner: View {
+    let hasFullDiskAccess: Bool
+    let deniedCount: Int
+    let onOpenSheet: () -> Void
+
+    private let title = "Full Disk Access required for complete results"
+
+    private var subtitle: String {
+        if !hasFullDiskAccess {
+            return "Go to System Settings → Privacy & Security → Full Disk Access and add DirStat."
+        }
+        let folders = deniedCount == 1 ? "1 folder" : "\(deniedCount) folders"
+        return "\(folders) couldn't be read. Grant Full Disk Access for a complete scan."
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "lock.shield")
@@ -381,21 +400,19 @@ private struct FullDiskAccessBanner: View {
                 .foregroundStyle(.orange)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text("Full Disk Access required for complete results")
+                Text(title)
                     .font(.system(size: 12, weight: .semibold))
-                Text("Go to System Settings → Privacy & Security → Full Disk Access and add DirStat.")
+                Text(subtitle)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
 
             Spacer()
 
-            Button("Open Settings") {
-                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
-            }
-            .font(.system(size: 11, weight: .medium))
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            Button("Open Settings", action: onOpenSheet)
+                .font(.system(size: 11, weight: .medium))
+                .buttonStyle(.bordered)
+                .controlSize(.small)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)

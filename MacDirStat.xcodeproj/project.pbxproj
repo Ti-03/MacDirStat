@@ -16,6 +16,7 @@
 		3881FC74433C93187BF941AF /* FSNode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35F5AEBBF9DECB5CB793339A /* FSNode.swift */; };
 		3B190FDF9A024126B4ED2872 /* GlassWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B5316639CA4AC8990FBDD4 /* GlassWindow.swift */; };
 		D1E2F3A4B5C607182930AABD /* GlassCompat.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F607182930AABC /* GlassCompat.swift */; };
+		FDA0FDA0FDA0FDA0FDA00002 /* FullDiskAccessSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDA0FDA0FDA0FDA0FDA00001 /* FullDiskAccessSheet.swift */; };
 		3F67AACE53A6C32467A5191C /* TreemapRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 670402F6A7AEB43C1D764E04 /* TreemapRenderer.swift */; };
 		7AE6B3CB6CDE22EAA3AA46B3 /* DuplicateDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42B58422D704C6E5265DA664 /* DuplicateDetector.swift */; };
 		86B25923164A00AB10D72C9B /* ScanProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBCAD22DB54E68077B842421 /* ScanProgress.swift */; };
@@ -40,6 +41,7 @@
 		074CBBA0222600D63C734574 /* ExtensionColorMap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionColorMap.swift; sourceTree = "<group>"; };
 		08B5316639CA4AC8990FBDD4 /* GlassWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassWindow.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F607182930AABC /* GlassCompat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassCompat.swift; sourceTree = "<group>"; };
+		FDA0FDA0FDA0FDA0FDA00001 /* FullDiskAccessSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullDiskAccessSheet.swift; sourceTree = "<group>"; };
 		2767B8AD8F6829C36A3576E6 /* DuplicatesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuplicatesView.swift; sourceTree = "<group>"; };
 		35F5AEBBF9DECB5CB793339A /* FSNode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FSNode.swift; sourceTree = "<group>"; };
 		42B58422D704C6E5265DA664 /* DuplicateDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuplicateDetector.swift; sourceTree = "<group>"; };
@@ -182,6 +184,7 @@
 				7F8FDBB44CE9624311841E36 /* ContentView.swift */,
 				08B5316639CA4AC8990FBDD4 /* GlassWindow.swift */,
 				A1B2C3D4E5F607182930AABC /* GlassCompat.swift */,
+				FDA0FDA0FDA0FDA0FDA00001 /* FullDiskAccessSheet.swift */,
 				783902530DE4EA8040806BC9 /* SettingsView.swift */,
 			);
 			path = App;
@@ -323,6 +326,7 @@
 				3864E5104A08A42FF56D7880 /* ContentView.swift in Sources */,
 				3B190FDF9A024126B4ED2872 /* GlassWindow.swift in Sources */,
 				D1E2F3A4B5C607182930AABD /* GlassCompat.swift in Sources */,
+				FDA0FDA0FDA0FDA0FDA00002 /* FullDiskAccessSheet.swift in Sources */,
 				E5BB63BED418F08CF4727F72 /* SettingsView.swift in Sources */,
 				7AE6B3CB6CDE22EAA3AA46B3 /* DuplicateDetector.swift in Sources */,
 				C001072776950E6399A45B18 /* ExtensionColorMap.swift in Sources */,
