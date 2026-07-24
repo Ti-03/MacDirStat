@@ -55,6 +55,79 @@ final class AutoSummaryTests: XCTestCase {
         return node.children.reduce(0) { $0 + totalAccountedFiles($1) }
     }
 
+    // Regression test for the summary-pool forward-progress hazard.
+    //
+    // `summarizeSubtree` used to keep a synchronous signature and bridge into
+    // its nested worker pool by blocking the calling thread on a
+    // DispatchSemaphore. Because the caller runs on a Swift-concurrency
+    // cooperative thread and the nested pool needs threads from that same
+    // pool, enough SIMULTANEOUS summaries could block every cooperative
+    // thread waiting on work that had no thread left to run on. A wedged
+    // summary also pins the main scan's in-flight count above zero, so
+    // `WorkQueue.isFinished` never trips and every other scan worker spins
+    // forever - one stuck summary hung the entire scan, and cancelling did
+    // not recover it.
+    //
+    // This builds many sibling directories that ALL trip summarization at
+    // once (far more than the worker-pool cap, so the scheduler is forced to
+    // overlap them) and asserts the scan still completes with correct totals.
+    // Against the old blocking bridge this is the shape that could hang;
+    // with the pool awaited directly it simply finishes.
+    func test_many_concurrent_summaries_complete_without_stalling() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // 24 siblings >> the 8-worker cap on either pool, so many summaries
+        // are guaranteed to be in flight at the same time. Each candidate is
+        // named `node_modules` so it summarizes via the deterministic
+        // named-layout shortcut rather than depending on the filesystem's
+        // allocated-size rounding to satisfy the average-size heuristic.
+        let siblingCount = 24
+        let filesPerSibling = 12
+        var expectedFiles = 0
+
+        for s in 0..<siblingCount {
+            let holder = root.appendingPathComponent("pkg\(s)", isDirectory: true)
+            let target = holder.appendingPathComponent("node_modules", isDirectory: true)
+            // A nested dir inside each summarized subtree so the nested pool
+            // actually has queued work rather than returning on the fast path.
+            let deeper = target.appendingPathComponent("inner", isDirectory: true)
+            try FileManager.default.createDirectory(at: deeper, withIntermediateDirectories: true)
+
+            for f in 0..<filesPerSibling {
+                try Data(repeating: 7, count: 16).write(to: target.appendingPathComponent("f\(f).dat"))
+                expectedFiles += 1
+            }
+            try Data(repeating: 8, count: 16).write(to: deeper.appendingPathComponent("deep.dat"))
+            expectedFiles += 1
+        }
+
+        // node_modules is excluded outright by the shipped defaults, so drop it
+        // from the exclusion list to actually exercise summarization here.
+        let summarized = await withExcludedFolderNames(".git,DerivedData,.Trash") {
+            await withAutoSummarize(true) { await scanTree(at: root) }
+        }
+        guard let summarized else { return XCTFail("summarized scan produced no root") }
+
+        let full = await withExcludedFolderNames(".git,DerivedData,.Trash") {
+            await withAutoSummarize(false) { await scanTree(at: root) }
+        }
+        guard let full else { return XCTFail("full scan produced no root") }
+
+        // Completion alone is the hang regression; these assert it also stayed correct.
+        XCTAssertEqual(summarized.size, full.size, "concurrent summaries must not change total size")
+        XCTAssertEqual(totalAccountedFiles(summarized), expectedFiles)
+        XCTAssertEqual(totalAccountedFiles(full), expectedFiles)
+
+        let summarizedCount = countSummarized(summarized)
+        XCTAssertEqual(summarizedCount, siblingCount, "every sibling cache dir should have summarized")
+    }
+
+    private func countSummarized(_ node: FileNode) -> Int {
+        (node.isAutoSummarized ? 1 : 0) + node.children.reduce(0) { $0 + countSummarized($1) }
+    }
+
     private func findNode(_ root: FileNode, path: [String]) -> FileNode? {
         var current = root
         for name in path {

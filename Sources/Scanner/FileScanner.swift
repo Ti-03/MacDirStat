@@ -268,7 +268,7 @@ private func _runWorker(
     while true {
         try Task.checkCancellation()
         if let item = queue.pop() {
-            try _processDirectory(item: item, rootDevKey: rootDevKey, counter: counter, visited: visited, config: config, queue: queue)
+            try await _processDirectory(item: item, rootDevKey: rootDevKey, counter: counter, visited: visited, config: config, queue: queue)
             continue
         }
         if queue.isFinished { return }
@@ -288,7 +288,7 @@ private func _processDirectory(
     visited: VisitedSet,
     config: ScanConfig,
     queue: WorkQueue
-) throws {
+) async throws {
     defer { queue.markDone() }
     try Task.checkCancellation()
 
@@ -325,7 +325,7 @@ private func _processDirectory(
 
     if config.autoSummarizeEnabled,
        shouldAutoSummarize(entries: entries, name: item.url.lastPathComponent, depth: item.depth) {
-        let summary = try summarizeSubtree(
+        let summary = try await summarizeSubtree(
             rootEntries: entries,
             rootPath: item.path,
             rootDev: rootDevKey,

@@ -139,26 +139,6 @@ private final class SummaryAccumulator: @unchecked Sendable {
     }
 }
 
-// Tiny lock-guarded box used only to carry the first error thrown by the
-// worker pool back across the sync/async bridge in `summarizeSubtree`.
-private final class SummaryResultBox: @unchecked Sendable {
-    private var lock = os_unfair_lock()
-    private var storedError: Error?
-
-    func setErrorIfAbsent(_ error: Error) {
-        os_unfair_lock_lock(&lock)
-        if storedError == nil { storedError = error }
-        os_unfair_lock_unlock(&lock)
-    }
-
-    var error: Error? {
-        os_unfair_lock_lock(&lock)
-        let result = storedError
-        os_unfair_lock_unlock(&lock)
-        return result
-    }
-}
-
 // Parallel walk of the subtree rooted at a directory already deemed a
 // summarization candidate. Applies the exact same scan semantics as the main
 // traversal (symlink/hidden/exclusion/mount-point skips, hardlink +
@@ -182,25 +162,28 @@ private final class SummaryResultBox: @unchecked Sendable {
 // hazard to worry about; the only shared mutable state is the queue and the
 // accumulator, both lock-guarded.
 //
-// Concurrency bridge: this function's signature stays synchronous (`throws`,
-// not `async`) so its one call site in FileScanner.swift is unchanged - it
-// already runs on one of the main scan's worker threads, itself inside an
-// async Task. To drive `withThrowingTaskGroup` from here, it hands the pool
-// off to a detached Task and blocks this thread on a semaphore, polling with
-// a short timeout so it can keep re-checking the ORIGINAL caller's
-// cancellation via the passed-in `cancel` closure (`Task.checkCancellation`
-// is dynamic-scoped to whatever Task is executing at the call site, so
-// checking it here - still on the calling worker's own Task - reflects the
-// real scan's cancellation; the detached pool Task is a separate Task, so
-// checking cancellation from inside it would never see the outer scan being
-// cancelled unless we explicitly forward it, which is what the polling loop
-// below does via `poolTask.cancel()`).
+// Concurrency: this function is `async` and drives its nested worker pool
+// with a plain `withThrowingTaskGroup`, awaited directly by the calling scan
+// worker. It deliberately does NOT block a thread to bridge sync->async.
 //
-// This runs nested inside one main-scan worker's task; a nested worker pool
-// is fine here. Oversubscription (main pool x summary pool) is bounded (both
-// pools cap at 8 workers) and self-limiting: only directories big enough to
-// trip auto-summarization spin up a nested pool at all, and macOS's
-// thread-pool scheduling handles the resulting oversubscription gracefully.
+// An earlier version kept a synchronous signature and bridged by handing the
+// pool to a detached Task while blocking the caller's thread on a
+// DispatchSemaphore. That was a forward-progress hazard: the caller runs on a
+// Swift-concurrency cooperative thread, and the nested pool needs threads
+// from that same pool to run. With enough sibling directories summarizing at
+// once (a monorepo with several node_modules trees), every cooperative thread
+// could end up blocked waiting for work that has no thread left to run on.
+// Worse, a wedged summary keeps the main scan's `inFlight` counter above zero
+// forever, so `WorkQueue.isFinished` never trips and EVERY other scan worker
+// spins too - one stuck summary hangs the whole scan, and cancellation could
+// not recover it. Awaiting the group directly removes the hazard entirely:
+// no thread is ever blocked, and cancellation propagates through structured
+// concurrency for free.
+//
+// Oversubscription (main pool x summary pool) remains bounded - both pools
+// cap at 8 workers, and only directories big enough to trip auto-summarization
+// spin up a nested pool at all - but it is now merely a scheduling concern,
+// not a correctness one.
 func summarizeSubtree(
     rootEntries: [BulkDirEntry],
     rootPath: String,
@@ -208,7 +191,7 @@ func summarizeSubtree(
     config: ScanConfig,
     visited: VisitedSet,
     cancel: @Sendable @escaping () throws -> Void
-) throws -> (allocatedSize: Int64, fileCount: Int) {
+) async throws -> (allocatedSize: Int64, fileCount: Int) {
     var totalAllocated: Int64 = 0
     var fileCount = 0
     var seedDirs: [String] = []
@@ -248,33 +231,16 @@ func summarizeSubtree(
 
     let queue = SummaryDirQueue(seed: seedDirs)
     let accumulator = SummaryAccumulator(allocatedSize: totalAllocated, fileCount: fileCount)
-    let resultBox = SummaryResultBox()
     let workerCount = min(max(2, ProcessInfo.processInfo.activeProcessorCount / 2), 8)
 
-    let semaphore = DispatchSemaphore(value: 0)
-    let poolTask = Task.detached(priority: .userInitiated) {
-        do {
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                for _ in 0..<workerCount {
-                    group.addTask {
-                        try await _summaryWorker(queue: queue, rootDev: rootDev, config: config, visited: visited, accumulator: accumulator, cancel: cancel)
-                    }
-                }
-                try await group.waitForAll()
+    try await withThrowingTaskGroup(of: Void.self) { group in
+        for _ in 0..<workerCount {
+            group.addTask {
+                try await _summaryWorker(queue: queue, rootDev: rootDev, config: config, visited: visited, accumulator: accumulator, cancel: cancel)
             }
-        } catch {
-            resultBox.setErrorIfAbsent(error)
         }
-        semaphore.signal()
+        try await group.waitForAll()
     }
-
-    while semaphore.wait(timeout: .now() + .milliseconds(20)) == .timedOut {
-        if (try? cancel()) == nil {
-            poolTask.cancel()
-        }
-    }
-
-    if let error = resultBox.error { throw error }
 
     let final = accumulator.snapshot
     return (final.allocatedSize, final.fileCount)
