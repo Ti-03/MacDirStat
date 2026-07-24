@@ -34,6 +34,10 @@
 		F81DF36922942E2F442814A3 /* TreemapLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAB4247FB8E3E3FB5AF053F9 /* TreemapLayout.swift */; };
 		FB3E660E0C4E74F2A9EFBEF0 /* FileScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDD56FD4714436315629F989 /* FileScanner.swift */; };
 		FD11F6ED4164F05503706848 /* ExtensionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 987EDA67820F162556A7CA53 /* ExtensionListView.swift */; };
+		84449F67C7DF40C737411C80 /* FileTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B5ADD782F265EBF4B1037EE /* FileTree.swift */; };
+		A498AC088B1E3C6E1B255BC2 /* FileNode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9429B8A593856D8B12941F49 /* FileNode.swift */; };
+		26B861D7144BFB6B2FD00F6B /* FileNodeRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = F03CE9327807EE8357D3678B /* FileNodeRecord.swift */; };
+		E7ED11C27A082009974B4706 /* FileTreeBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FB7871D4D4A1E73B7984396 /* FileTreeBuilder.swift */; };
 		SPARK003000000000000003AA /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = SPARK002000000000000002AA /* Sparkle */; };
 /* End PBXBuildFile section */
 
@@ -68,6 +72,10 @@
 		DDD56FD4714436315629F989 /* FileScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileScanner.swift; sourceTree = "<group>"; };
 		EE11223344556677889900EE /* FileWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileWatcher.swift; sourceTree = "<group>"; };
 		F6ADF08FD012926F8704A51C /* MacDirStat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MacDirStat.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		1B5ADD782F265EBF4B1037EE /* FileTree.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTree.swift; sourceTree = "<group>"; };
+		9429B8A593856D8B12941F49 /* FileNode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileNode.swift; sourceTree = "<group>"; };
+		F03CE9327807EE8357D3678B /* FileNodeRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileNodeRecord.swift; sourceTree = "<group>"; };
+		4FB7871D4D4A1E73B7984396 /* FileTreeBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTreeBuilder.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -134,6 +142,17 @@
 				DBCAD22DB54E68077B842421 /* ScanProgress.swift */,
 			);
 			path = Scanner;
+			sourceTree = "<group>";
+		};
+		794E4678AAB2F65C291BAFA3 /* Model */ = {
+			isa = PBXGroup;
+			children = (
+				1B5ADD782F265EBF4B1037EE /* FileTree.swift */,
+				9429B8A593856D8B12941F49 /* FileNode.swift */,
+				F03CE9327807EE8357D3678B /* FileNodeRecord.swift */,
+				4FB7871D4D4A1E73B7984396 /* FileTreeBuilder.swift */,
+			);
+			path = Model;
 			sourceTree = "<group>";
 		};
 		943FF7A0195AF9CFFDCE7D83 /* DirectoryTree */ = {
@@ -238,6 +257,7 @@
 				AB8D408CB1881C666AAC0832 /* App */,
 				2401B46468064D5D254B09BA /* Duplicates */,
 				D6C0DA3A2FC09B3404E91BF6 /* Layout */,
+				794E4678AAB2F65C291BAFA3 /* Model */,
 				CC11223344556677889900CC /* Safety */,
 				7332ECE572A5B7E9E9A8F57F /* Scanner */,
 				EE1E649591DBDF61DE2E4396 /* ViewModels */,
@@ -347,6 +367,10 @@
 				09F2331AB12AD6C9FB63744A /* HapticEngine.swift in Sources */,
 				3F67AACE53A6C32467A5191C /* TreemapRenderer.swift in Sources */,
 				20E67F1EEADF74D28CDF6191 /* TreemapView.swift in Sources */,
+				84449F67C7DF40C737411C80 /* FileTree.swift in Sources */,
+				A498AC088B1E3C6E1B255BC2 /* FileNode.swift in Sources */,
+				26B861D7144BFB6B2FD00F6B /* FileNodeRecord.swift in Sources */,
+				E7ED11C27A082009974B4706 /* FileTreeBuilder.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

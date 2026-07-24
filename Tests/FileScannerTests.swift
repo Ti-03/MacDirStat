@@ -51,9 +51,9 @@ final class FileScannerTests: XCTestCase {
         try Data(repeating: 0, count: 2048).write(to: file2)
 
         let scanner = FileScanner()
-        var root: FSNode?
+        var root: FileNode?
         for await progress in await scanner.scan(url: tmp) {
-            if case .completed(let node, _) = progress { root = node }
+            if case .completed(let tree, _) = progress { root = FileNode(tree: tree, index: tree.rootIndex) }
         }
 
         XCTAssertNotNil(root)
@@ -74,9 +74,9 @@ final class FileScannerTests: XCTestCase {
         try Data(repeating: 0, count: 4096).write(to: sub.appendingPathComponent("big.bin"))
 
         let scanner = FileScanner()
-        var root: FSNode?
+        var root: FileNode?
         for await progress in await scanner.scan(url: tmp) {
-            if case .completed(let node, _) = progress { root = node }
+            if case .completed(let tree, _) = progress { root = FileNode(tree: tree, index: tree.rootIndex) }
         }
 
         XCTAssertEqual(root?.size ?? 0, root?.children.first?.size ?? -1)
@@ -93,9 +93,9 @@ final class FileScannerTests: XCTestCase {
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
 
         let scanner = FileScanner()
-        var root: FSNode?
+        var root: FileNode?
         for await progress in await scanner.scan(url: tmp) {
-            if case .completed(let node, _) = progress { root = node }
+            if case .completed(let tree, _) = progress { root = FileNode(tree: tree, index: tree.rootIndex) }
         }
 
         XCTAssertEqual(root?.children.count, 1, "symlink should be skipped")
@@ -116,9 +116,9 @@ final class FileScannerTests: XCTestCase {
         let fullSize = Int64(st.st_blocks) * 512
 
         let scanner = FileScanner()
-        var root: FSNode?
+        var root: FileNode?
         for await progress in await scanner.scan(url: tmp) {
-            if case .completed(let node, _) = progress { root = node }
+            if case .completed(let tree, _) = progress { root = FileNode(tree: tree, index: tree.rootIndex) }
         }
 
         let n1 = root?.children.first { $0.name == "hard1.bin" }
@@ -142,11 +142,11 @@ final class FileScannerTests: XCTestCase {
         }
 
         let scanner = FileScanner()
-        var root: FSNode?
+        var root: FileNode?
         var deniedCount = 0
         for await progress in await scanner.scan(url: tmp) {
-            if case .completed(let node, let denied) = progress {
-                root = node
+            if case .completed(let tree, let denied) = progress {
+                root = FileNode(tree: tree, index: tree.rootIndex)
                 deniedCount = denied
             }
         }
@@ -181,9 +181,9 @@ final class FileScannerTests: XCTestCase {
         try Data(repeating: 0, count: 4096).write(to: keepDir.appendingPathComponent("file.bin"))
 
         let scanner = FileScanner()
-        var root: FSNode?
+        var root: FileNode?
         for await progress in await scanner.scan(url: tmp) {
-            if case .completed(let node, _) = progress { root = node }
+            if case .completed(let tree, _) = progress { root = FileNode(tree: tree, index: tree.rootIndex) }
         }
 
         XCTAssertNotNil(root)
@@ -216,9 +216,9 @@ final class FileScannerTests: XCTestCase {
         UserDefaults.standard.set(false, forKey: "showHiddenFiles")
         do {
             let scanner = FileScanner()
-            var root: FSNode?
+            var root: FileNode?
             for await progress in await scanner.scan(url: tmp) {
-                if case .completed(let node, _) = progress { root = node }
+                if case .completed(let tree, _) = progress { root = FileNode(tree: tree, index: tree.rootIndex) }
             }
             let names = Set(root?.children.map { $0.name } ?? [])
             XCTAssertFalse(names.contains(".hidden"), "hidden file should be excluded when showHiddenFiles is false")
@@ -228,9 +228,9 @@ final class FileScannerTests: XCTestCase {
         UserDefaults.standard.set(true, forKey: "showHiddenFiles")
         do {
             let scanner = FileScanner()
-            var root: FSNode?
+            var root: FileNode?
             for await progress in await scanner.scan(url: tmp) {
-                if case .completed(let node, _) = progress { root = node }
+                if case .completed(let tree, _) = progress { root = FileNode(tree: tree, index: tree.rootIndex) }
             }
             let names = Set(root?.children.map { $0.name } ?? [])
             XCTAssertTrue(names.contains(".hidden"), "hidden file should be included when showHiddenFiles is true")
@@ -277,15 +277,15 @@ final class FileScannerTests: XCTestCase {
         }
 
         let scanner = FileScanner()
-        var root: FSNode?
+        var root: FileNode?
         for await progress in await scanner.scan(url: tmp) {
-            if case .completed(let node, _) = progress { root = node }
+            if case .completed(let tree, _) = progress { root = FileNode(tree: tree, index: tree.rootIndex) }
         }
 
         XCTAssertNotNil(root)
         XCTAssertEqual(root?.size, expectedSize, "total allocated size must match regardless of task-group vs inline recursion")
 
-        func countNodes(_ node: FSNode) -> (dirs: Int, files: Int) {
+        func countNodes(_ node: FileNode) -> (dirs: Int, files: Int) {
             if node.isDirectory {
                 var dirs = 1
                 var files = 0

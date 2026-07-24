@@ -40,12 +40,12 @@ final class BulkScannerTests: XCTestCase {
         let total: Int64
     }
 
-    private func fingerprint(root: FSNode, base: URL) -> Fingerprint {
+    private func fingerprint(root: FileNode, base: URL) -> Fingerprint {
         var fileEntries: [FileFingerprintEntry] = []
         var directoryPaths: [String] = []
         var groups: [HardLinkRef: (paths: Set<String>, total: Int64)] = [:]
 
-        func visit(_ node: FSNode) {
+        func visit(_ node: FileNode) {
             let relativePath = String(node.url.path.dropFirst(base.path.count))
             if node.isDirectory {
                 directoryPaths.append(relativePath)
@@ -71,11 +71,11 @@ final class BulkScannerTests: XCTestCase {
         return Fingerprint(fileEntries: fileEntries, directoryPaths: directoryPaths, hardlinkGroups: hardlinkGroups, total: root.size)
     }
 
-    private func scanTree(at url: URL) async -> FSNode? {
+    private func scanTree(at url: URL) async -> FileNode? {
         let scanner = FileScanner()
-        var root: FSNode?
+        var root: FileNode?
         for await progress in await scanner.scan(url: url) {
-            if case .completed(let node, _) = progress { root = node }
+            if case .completed(let tree, _) = progress { root = FileNode(tree: tree, index: tree.rootIndex) }
         }
         return root
     }
@@ -244,10 +244,10 @@ final class BulkScannerTests: XCTestCase {
 
         var deniedCount = 0
         let scanner = FileScanner()
-        var root: FSNode?
+        var root: FileNode?
         for await progress in await scanner.scan(url: tmp) {
-            if case .completed(let node, let denied) = progress {
-                root = node
+            if case .completed(let tree, let denied) = progress {
+                root = FileNode(tree: tree, index: tree.rootIndex)
                 deniedCount = denied
             }
         }

@@ -12,7 +12,7 @@ final class DiagScanTests: XCTestCase {
         }
 
         let scanner = FileScanner()
-        var completedRoot: FSNode?
+        var completedRoot: FileNode?
         var lastItems = 0
         var lastBytes: Int64 = 0
         for await progress in await scanner.scan(url: URL(fileURLWithPath: target)) {
@@ -20,8 +20,8 @@ final class DiagScanTests: XCTestCase {
             case .update(let items, let bytes):
                 lastItems = items
                 lastBytes = bytes
-            case .completed(let root, _):
-                completedRoot = root
+            case .completed(let tree, _):
+                completedRoot = FileNode(tree: tree, index: tree.rootIndex)
             case .failed(let msg):
                 XCTFail("scan failed: \(msg)")
             }

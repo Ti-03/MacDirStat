@@ -54,7 +54,10 @@ final class TreemapLayoutTests: XCTestCase {
 
     // MARK: - Helpers
 
-    func makeTree(_ files: [(String, Int64)]) -> FSNode {
+    // Builds an FSNode fixture (as before) and converts it to a FileTree,
+    // returning a FileNode handle onto its root — TreemapLayout/ExtensionColorMap
+    // are now FileNode-based, but the fixture construction itself is unchanged.
+    func makeTree(_ files: [(String, Int64)]) -> FileNode {
         let root = FSNode(url: URL(fileURLWithPath: "/"), name: "/", isDirectory: true, size: 0, fileExtension: "", parent: nil)
         for (name, size) in files {
             let ext = (name as NSString).pathExtension.lowercased()
@@ -62,7 +65,8 @@ final class TreemapLayoutTests: XCTestCase {
             root.children.append(child)
             root.size += size
         }
-        return root
+        let tree = FileTreeBuilder.build(from: root, rootPath: "/")
+        return FileNode(tree: tree, index: tree.rootIndex)
     }
 
     // The layout is a radial sunburst: a node's children fill the angular range
@@ -120,7 +124,7 @@ final class TreemapLayoutTests: XCTestCase {
     }
 
     func test_layout_empty_children_returns_no_cells() {
-        let root = FSNode(url: URL(fileURLWithPath: "/"), name: "/", isDirectory: true, size: 0, fileExtension: "", parent: nil)
+        let root = makeTree([])
         let map = ExtensionColorMap(root: root)
         let cells = TreemapLayout.compute(root: root, in: CGRect(x: 0, y: 0, width: 400, height: 400), colorMap: map)
         XCTAssertTrue(cells.isEmpty)

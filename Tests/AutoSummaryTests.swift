@@ -36,26 +36,26 @@ final class AutoSummaryTests: XCTestCase {
         return try await body()
     }
 
-    private func scanTree(at url: URL) async -> FSNode? {
+    private func scanTree(at url: URL) async -> FileNode? {
         let scanner = FileScanner()
-        var root: FSNode?
+        var root: FileNode?
         for await progress in await scanner.scan(url: url) {
-            if case .completed(let node, _) = progress { root = node }
+            if case .completed(let tree, _) = progress { root = FileNode(tree: tree, index: tree.rootIndex) }
         }
         return root
     }
 
-    // Recursively counts every non-directory FSNode (normal leaf files) plus
+    // Recursively counts every non-directory FileNode (normal leaf files) plus
     // every isAutoSummarized node's descendantFileCount, so summarized and
     // non-summarized scans of the same tree can be compared on a "how many
     // files did we account for" basis.
-    private func totalAccountedFiles(_ node: FSNode) -> Int {
+    private func totalAccountedFiles(_ node: FileNode) -> Int {
         if node.isAutoSummarized { return node.descendantFileCount }
         if !node.isDirectory { return 1 }
         return node.children.reduce(0) { $0 + totalAccountedFiles($1) }
     }
 
-    private func findNode(_ root: FSNode, path: [String]) -> FSNode? {
+    private func findNode(_ root: FileNode, path: [String]) -> FileNode? {
         var current = root
         for name in path {
             guard let next = current.children.first(where: { $0.name == name }) else { return nil }
@@ -287,7 +287,7 @@ final class AutoSummaryTests: XCTestCase {
         }
         let url = URL(fileURLWithPath: path)
 
-        func countNodes(_ node: FSNode) -> Int {
+        func countNodes(_ node: FileNode) -> Int {
             1 + node.children.reduce(0) { $0 + countNodes($1) }
         }
 
