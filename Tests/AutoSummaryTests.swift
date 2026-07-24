@@ -128,6 +128,128 @@ final class AutoSummaryTests: XCTestCase {
         (node.isAutoSummarized ? 1 : 0) + node.children.reduce(0) { $0 + countSummarized($1) }
     }
 
+    // The other half of the forward-progress bug: with the old blocking
+    // bridge, the poll loop only forwarded cancellation to the detached pool
+    // and kept spinning, so a wedged summary could not be recovered by
+    // "Stop Scan" at all.
+    //
+    // Drives `summarizeSubtree` DIRECTLY with a cancel closure that throws
+    // partway through, rather than cancelling a whole scan. An end-to-end
+    // scan-then-cancel test looks like it covers this but does not: the
+    // cancellation almost always lands during the initial traversal, before
+    // any summary walk has begun, so the test passes even with every
+    // cancellation check inside the summary path deleted (verified by
+    // mutation). Calling the walk directly is deterministic and actually
+    // fails if the walk stops honouring `cancel`.
+    func test_summary_walk_propagates_cancellation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Enough nested directories that the walk makes many cancel() calls.
+        for d in 0..<40 {
+            let deep = root.appendingPathComponent("m\(d)", isDirectory: true)
+            try FileManager.default.createDirectory(at: deep, withIntermediateDirectories: true)
+            for f in 0..<10 {
+                try Data(repeating: 1, count: 32).write(to: deep.appendingPathComponent("f\(f).dat"))
+            }
+        }
+
+        var st = stat()
+        XCTAssertEqual(lstat(root.path, &st), 0)
+        let rootDev = UInt64(bitPattern: Int64(st.st_dev))
+
+        let fd = open(root.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        defer { close(fd) }
+        let rootEntries = try listDirectoryEntries(path: root.path, fd: fd, forceFallback: false)
+
+        struct StopWalking: Error {}
+        // Let a few directories through, then refuse to continue.
+        let callCount = Counter()
+        let config = ScanConfig(
+            excludedNames: [],
+            showHiddenFiles: false,
+            forceFallbackEnum: false,
+            autoSummarizeEnabled: true
+        )
+
+        do {
+            _ = try await summarizeSubtree(
+                rootEntries: rootEntries,
+                rootPath: root.path,
+                rootDev: rootDev,
+                config: config,
+                visited: VisitedSet()
+            ) {
+                if callCount.increment() > 5 { throw StopWalking() }
+            }
+            XCTFail("summarizeSubtree must propagate the cancel closure's error, not swallow it")
+        } catch is StopWalking {
+            // Expected: the walk asked, was told to stop, and unwound.
+        }
+    }
+
+    // Thread-safe call counter: the summary pool invokes `cancel` from
+    // several workers at once.
+    private final class Counter: @unchecked Sendable {
+        private var lock = os_unfair_lock()
+        private var value = 0
+        func increment() -> Int {
+            os_unfair_lock_lock(&lock)
+            value += 1
+            let result = value
+            os_unfair_lock_unlock(&lock)
+            return result
+        }
+    }
+
+    // Complements the direct test above: a full scan with summarization
+    // enabled must still cancel cleanly and never emit `.completed`.
+    func test_cancelled_scan_with_summarization_never_completes() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Enough summarizable siblings, each with real depth and file count,
+        // that a full uncancelled scan takes appreciable time.
+        for s in 0..<12 {
+            let holder = root.appendingPathComponent("pkg\(s)", isDirectory: true)
+            let target = holder.appendingPathComponent("node_modules", isDirectory: true)
+            for d in 0..<12 {
+                let deep = target.appendingPathComponent("m\(d)", isDirectory: true)
+                try FileManager.default.createDirectory(at: deep, withIntermediateDirectories: true)
+                for f in 0..<25 {
+                    try Data(repeating: 9, count: 64).write(to: deep.appendingPathComponent("f\(f).dat"))
+                }
+            }
+        }
+
+        let elapsed: Double = await withExcludedFolderNames(".git,DerivedData,.Trash") {
+            await withAutoSummarize(true) {
+                let scanner = FileScanner()
+                var sawCompleted = false
+                let stream = await scanner.scan(url: root)
+                let start = DispatchTime.now()
+                let consumeTask = Task {
+                    for await progress in stream {
+                        if case .completed = progress { sawCompleted = true }
+                    }
+                }
+                await scanner.cancel()
+                _ = await consumeTask.value
+                let seconds = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
+
+                XCTAssertFalse(sawCompleted, "a scan cancelled during summarization must not emit .completed")
+                return seconds
+            }
+        }
+
+        // Generous bound: the point is "it unwinds", not a precise deadline.
+        // Against a wedged pool this would never return at all.
+        XCTAssertLessThan(elapsed, 10.0, "cancellation during a summary walk should tear down promptly")
+    }
+
     private func findNode(_ root: FileNode, path: [String]) -> FileNode? {
         var current = root
         for name in path {
