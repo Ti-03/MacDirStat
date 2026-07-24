@@ -10,6 +10,11 @@ public struct ScanChange: Identifiable, Hashable, Sendable {
         case removed
         case grew
         case shrank
+        // Same path, different kind of thing: a file was replaced by a
+        // directory or vice versa. Reported as its own row because neither
+        // "added"/"removed" (the path exists on both sides) nor
+        // "grew"/"shrank" (which compare like with like) describes it.
+        case replaced
     }
 
     public let relativePath: String
@@ -55,7 +60,12 @@ public enum ScanComparison {
         // "added" row, exactly like Radix's diff-row suppression.
         for (relativePath, afterNodeIndex) in afterIndex {
             guard beforeIndex[relativePath] == nil else { continue }
-            if let parentPath = parentRelativePath(of: relativePath), beforeIndex[parentPath] == nil {
+            // The parent counts as pre-existing only if it was there AND was
+            // already a directory. If it was a *file* that has since become a
+            // directory, everything now inside it is new content implied by
+            // that node's own "replaced" row, so suppress it here.
+            if let parentPath = parentRelativePath(of: relativePath),
+               !existsAsDirectory(parentPath, in: beforeIndex, of: before) {
                 continue
             }
             let record = after.records[afterNodeIndex]
@@ -75,7 +85,11 @@ public enum ScanComparison {
         // reported.
         for (relativePath, beforeNodeIndex) in beforeIndex {
             guard afterIndex[relativePath] == nil else { continue }
-            if let parentPath = parentRelativePath(of: relativePath), afterIndex[parentPath] == nil {
+            // Mirror of the added-side rule: if the parent is now a file where
+            // it used to be a directory, this node's disappearance is implied
+            // by the parent's "replaced" row.
+            if let parentPath = parentRelativePath(of: relativePath),
+               !existsAsDirectory(parentPath, in: afterIndex, of: after) {
                 continue
             }
             let record = before.records[beforeNodeIndex]
@@ -100,6 +114,24 @@ public enum ScanComparison {
             guard let afterNodeIndex = afterIndex[relativePath] else { continue }
             let beforeRecord = before.records[beforeNodeIndex]
             let afterRecord = after.records[afterNodeIndex]
+
+            // Type change (file <-> directory) at the same path. Reported
+            // regardless of whether the size happens to match, since the node
+            // is fundamentally a different thing now — and without this the
+            // pair would fall through both guards below and vanish from the
+            // report entirely.
+            if beforeRecord.isDirectory != afterRecord.isDirectory {
+                changes.append(ScanChange(
+                    relativePath: relativePath,
+                    name: afterRecord.name,
+                    isDirectory: afterRecord.isDirectory,
+                    kind: .replaced,
+                    beforeSize: beforeRecord.size,
+                    afterSize: afterRecord.size
+                ))
+                continue
+            }
+
             guard !beforeRecord.isDirectory, !afterRecord.isDirectory else { continue }
             guard beforeRecord.size != afterRecord.size else { continue }
             changes.append(ScanChange(
@@ -147,5 +179,19 @@ public enum ScanComparison {
             return relativePath.isEmpty ? nil : ""
         }
         return String(relativePath[..<lastSlash])
+    }
+
+    // Whether `relativePath` existed in the given tree AND was a directory
+    // there. Used by the add/remove collapsing rules: a path that existed only
+    // as a *file* is not a container its children could have "already been
+    // inside", so those children must be suppressed in favour of the parent's
+    // own `.replaced` row.
+    private static func existsAsDirectory(
+        _ relativePath: String,
+        in index: [String: Int],
+        of tree: FileTree
+    ) -> Bool {
+        guard let nodeIndex = index[relativePath] else { return false }
+        return tree.records[nodeIndex].isDirectory
     }
 }

@@ -83,6 +83,7 @@ struct ComparisonView: View {
         let removed = changes.filter { $0.kind == .removed }.count
         let grew = changes.filter { $0.kind == .grew }.count
         let shrank = changes.filter { $0.kind == .shrank }.count
+        let replaced = changes.filter { $0.kind == .replaced }.count
         let netDelta = changes.reduce(Int64(0)) { $0 + $1.delta }
 
         return HStack(spacing: 14) {
@@ -90,6 +91,9 @@ struct ComparisonView: View {
             summaryPill(count: removed, label: "removed", color: .red, icon: "minus.circle")
             summaryPill(count: grew, label: "grew", color: .orange, icon: "arrow.up.circle")
             summaryPill(count: shrank, label: "shrank", color: .teal, icon: "arrow.down.circle")
+            if replaced > 0 {
+                summaryPill(count: replaced, label: "replaced", color: .purple, icon: "arrow.triangle.swap")
+            }
 
             Spacer()
 
@@ -141,6 +145,7 @@ private struct ChangeRow: View {
         case .removed: return "minus.circle.fill"
         case .grew: return "arrow.up.circle.fill"
         case .shrank: return "arrow.down.circle.fill"
+        case .replaced: return "arrow.triangle.swap"
         }
     }
 
@@ -150,6 +155,7 @@ private struct ChangeRow: View {
         case .removed: return .red
         case .grew: return .orange
         case .shrank: return .teal
+        case .replaced: return .purple
         }
     }
 
@@ -192,7 +198,7 @@ private struct ChangeRow: View {
                 Text(ByteFormatter.string(from: change.beforeSize))
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)
-            case .grew, .shrank:
+            case .grew, .shrank, .replaced:
                 Text("\(ByteFormatter.string(from: change.beforeSize)) → \(ByteFormatter.string(from: change.afterSize))")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)

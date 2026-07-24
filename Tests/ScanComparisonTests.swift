@@ -125,4 +125,67 @@ final class ScanComparisonTests: XCTestCase {
         XCTAssertEqual(changes[0].kind, .added)
         XCTAssertEqual(changes[0].afterSize, 300)
     }
+
+    // MARK: - Type changes at the same path (file <-> directory)
+    //
+    // A path present in BOTH trees is skipped by the added/removed loops, and
+    // the grew/shrank loop only compares file-to-file. A node that changed
+    // kind therefore used to fall through every branch and vanish from the
+    // report entirely, while its new children were reported as plain "added"
+    // rows (their parent path technically existed before, as a file).
+
+    private func singleNodeTree(isDirectory: Bool, size: Int64, withChild child: (name: String, size: Int64)?) -> FileTree {
+        let root = FSNode(url: URL(fileURLWithPath: "/scan"), name: "scan", isDirectory: true, size: 0, fileExtension: "", parent: nil)
+        let a = FSNode(url: URL(fileURLWithPath: "/scan/A"), name: "A", isDirectory: isDirectory, size: size, fileExtension: isDirectory ? "" : "bin", parent: root)
+        if let child {
+            let inner = FSNode(url: URL(fileURLWithPath: "/scan/A/\(child.name)"), name: child.name, isDirectory: false, size: child.size, fileExtension: "txt", parent: a)
+            a.children = [inner]
+        }
+        root.children = [a]
+        root.size = a.size
+        return FileTreeBuilder.build(from: root, rootPath: "/scan")
+    }
+
+    func test_file_becoming_directory_is_reported_once_and_children_suppressed() {
+        let before = singleNodeTree(isDirectory: false, size: 10, withChild: nil)
+        let after = singleNodeTree(isDirectory: true, size: 2_000, withChild: ("inner.txt", 2_000))
+
+        let changes = ScanComparison.compare(before: before, after: after)
+
+        XCTAssertEqual(changes.count, 1, "expected exactly one row for the replaced node, got: \(changes.map { "\($0.relativePath):\($0.kind)" })")
+        XCTAssertEqual(changes[0].relativePath, "A")
+        XCTAssertEqual(changes[0].kind, .replaced)
+        XCTAssertTrue(changes[0].isDirectory)
+        XCTAssertEqual(changes[0].beforeSize, 10)
+        XCTAssertEqual(changes[0].afterSize, 2_000)
+        XCTAssertEqual(changes[0].delta, 1_990)
+    }
+
+    func test_directory_becoming_file_is_reported_once_and_old_children_suppressed() {
+        let before = singleNodeTree(isDirectory: true, size: 100, withChild: ("inner.txt", 100))
+        let after = singleNodeTree(isDirectory: false, size: 500, withChild: nil)
+
+        let changes = ScanComparison.compare(before: before, after: after)
+
+        XCTAssertEqual(changes.count, 1, "expected exactly one row for the replaced node, got: \(changes.map { "\($0.relativePath):\($0.kind)" })")
+        XCTAssertEqual(changes[0].relativePath, "A")
+        XCTAssertEqual(changes[0].kind, .replaced)
+        XCTAssertFalse(changes[0].isDirectory)
+        XCTAssertEqual(changes[0].beforeSize, 100)
+        XCTAssertEqual(changes[0].afterSize, 500)
+    }
+
+    // A type change with an identical size still matters: neither size-based
+    // branch would fire, so this specifically guards the "reported regardless
+    // of size" rule.
+    func test_type_change_with_identical_size_is_still_reported() {
+        let before = singleNodeTree(isDirectory: false, size: 100, withChild: nil)
+        let after = singleNodeTree(isDirectory: true, size: 100, withChild: ("inner.txt", 100))
+
+        let changes = ScanComparison.compare(before: before, after: after)
+
+        XCTAssertEqual(changes.count, 1)
+        XCTAssertEqual(changes[0].kind, .replaced)
+        XCTAssertEqual(changes[0].delta, 0)
+    }
 }
