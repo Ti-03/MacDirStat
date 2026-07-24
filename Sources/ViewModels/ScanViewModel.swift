@@ -402,7 +402,26 @@ public final class ScanViewModel: ObservableObject {
         let node = FileNode(tree: tree, index: index)
         let showHiddenFiles = UserDefaults.standard.bool(forKey: "showHiddenFiles")
         let excludedNames = parseExcludedNames()
-        var seenRefs = Set<HardLinkRef>()
+
+        // Cross-tree hardlink dedup (BUG 2 fix): `scanSubtree`'s own
+        // `treeRoot` parameter — meant to catch a hardlink whose twin lives
+        // outside the directory being rescanned via `firstNode(withRef:in:)`
+        // — only makes sense against a live FSNode tree, which no longer
+        // exists on this flat-store splice path, so it stays `nil` below and
+        // that check can never fire. Left alone, that means only hardlinks
+        // *within* this one rescanned directory would get deduped (via the
+        // fresh, otherwise-empty `seenRefs` below), and any twin living
+        // outside the spliced subtree would double-count. Pre-seeding
+        // `seenRefs` before the call replaces that dead check: it contains
+        // every `hardLinkRef` that appears anywhere in `tree` OUTSIDE the
+        // subtree being replaced, but ONLY when that outside occurrence is
+        // itself the size carrier (size > 0). That asymmetry matters — if
+        // the carrier instead lives INSIDE the subtree being replaced (i.e.
+        // the outside twin is the 0-size loser), seeding on the twin's mere
+        // presence would make the rescan zero its own copy too, and the
+        // inode's bytes would vanish from the tree entirely (both copies at
+        // 0) instead of correctly moving to whichever copy is now first-seen.
+        var seenRefs = Self.hardLinkRefsOutsideSubtree(rootedAt: index, in: tree)
         let freshNode = scanSubtree(
             url: node.url,
             parent: nil,
@@ -416,6 +435,35 @@ public final class ScanViewModel: ObservableObject {
 
         let subtree = FileTreeBuilder.build(from: freshNode, rootPath: node.url.path)
         return tree.replacingSubtree(at: index, with: subtree)
+    }
+
+    // BUG 2 fix support for `splicedTree`: marks every node inside the
+    // subtree rooted at `subtreeRootIndex` via the same iterative DFS
+    // `FileTree.removingSubtrees`/`replacingSubtree` use, then collects every
+    // `hardLinkRef` whose occurrence OUTSIDE that subtree is the size
+    // carrier (`size > 0`). See the comment at the `splicedTree` call site
+    // for why the `size > 0` condition (rather than mere presence) matters.
+    private nonisolated static func hardLinkRefsOutsideSubtree(rootedAt subtreeRootIndex: Int, in tree: FileTree) -> Set<HardLinkRef> {
+        let count = tree.records.count
+        var inside = [Bool](repeating: false, count: count)
+        var stack = [subtreeRootIndex]
+        while let i = stack.popLast() {
+            if inside[i] { continue }
+            inside[i] = true
+            let start = tree.childStart[i]
+            let cnt = tree.childCount[i]
+            for offset in 0..<cnt {
+                stack.append(tree.childIndices[start + offset])
+            }
+        }
+
+        var refs = Set<HardLinkRef>()
+        for i in 0..<count where !inside[i] {
+            if let ref = tree.records[i].hardLinkRef, tree.records[i].size > 0 {
+                refs.insert(ref)
+            }
+        }
+        return refs
     }
 
     // See the last bullet of `splicedTree`'s doc comment above.

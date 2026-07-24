@@ -376,4 +376,103 @@ final class IncrementalRefreshTests: XCTestCase {
         }
         XCTAssertEqual(Set(newSub.children.map(\.name)), Set(["a.txt", "new.bin"]), "the splice must reflect the on-disk addition")
     }
+
+    // MARK: - BUG 2: splice must keep hardlink dedup across the splice boundary
+
+    // Builds a real temp tree with one hardlinked pair split across two
+    // sibling directories (`dirX/big.bin` <-> `dirY/link.bin`), the exact
+    // shape of the plan's BUG 2 scenario. Returns the inode's `HardLinkRef`
+    // so the tests below can find out, after the initial scan, which side
+    // the scanner's first-seen-wins picked as the carrier (deterministic per
+    // run, but not something the test should hard-code).
+    private func makeHardlinkAcrossDirsFixture() throws -> (tmp: URL, ref: HardLinkRef) {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let dirX = tmp.appendingPathComponent("dirX")
+        let dirY = tmp.appendingPathComponent("dirY")
+        try FileManager.default.createDirectory(at: dirX, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dirY, withIntermediateDirectories: true)
+
+        let bigPath = dirX.appendingPathComponent("big.bin")
+        try Data(repeating: 9, count: 262_144).write(to: bigPath)
+        try FileManager.default.linkItem(at: bigPath, to: dirY.appendingPathComponent("link.bin"))
+        // An unrelated file in each directory so a splice of either side has
+        // something else in it besides the hardlink half.
+        try Data(repeating: 1, count: 128).write(to: dirX.appendingPathComponent("other.txt"))
+        try Data(repeating: 2, count: 128).write(to: dirY.appendingPathComponent("other.txt"))
+
+        var st = stat()
+        XCTAssertEqual(lstat(bigPath.path, &st), 0)
+        let ref = HardLinkRef(dev: UInt64(bitPattern: Int64(st.st_dev)), ino: UInt64(st.st_ino))
+        return (tmp, ref)
+    }
+
+    // Finds the node sharing `ref` whose size does (or doesn't, per
+    // `wantCarrier`) match the first-seen-wins carrier convention, then
+    // climbs to its direct child-of-root directory name — "the directory
+    // holding the carrier/twin" from the plan's scenario.
+    private func topLevelDirName(carryingRef wantCarrier: Bool, ref: HardLinkRef, tree: FileTree) -> String? {
+        for i in 0..<tree.records.count {
+            guard tree.records[i].hardLinkRef == ref, (tree.records[i].size > 0) == wantCarrier else { continue }
+            var current = i
+            while tree.parentIndex[current] != tree.rootIndex {
+                let p = tree.parentIndex[current]
+                guard p >= 0 else { return nil }
+                current = p
+            }
+            return tree.records[current].name
+        }
+        return nil
+    }
+
+    // Splicing the directory holding the NON-carrier (0-size) twin must not
+    // re-materialize the full size a second time: the carrier lives outside
+    // the spliced subtree, so it must be pre-seeded into `seenRefs` and the
+    // rescanned copy must come back at 0, exactly as it was.
+    func test_splice_of_directory_holding_hardlink_loser_matches_full_rescan_total() async throws {
+        let (tmp, ref) = try makeHardlinkAcrossDirsFixture()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let before = await scanAndWait(tmp)
+        guard let beforeTree = await before.tree else { return XCTFail("initial scan should populate a tree") }
+        guard let loserDirName = topLevelDirName(carryingRef: false, ref: ref, tree: beforeTree) else {
+            return XCTFail("expected to find the hardlink's 0-size twin in the initial scan")
+        }
+
+        guard let spliced = ScanViewModel.splicedTree(afterChangeAt: tmp.appendingPathComponent(loserDirName).path, in: beforeTree) else {
+            return XCTFail("splice should succeed for a plain, non-summarized subdirectory")
+        }
+
+        let after = await scanAndWait(tmp)
+        guard let afterTree = await after.tree else { return XCTFail("second full rescan should populate a tree") }
+
+        let splicedRoot = FileNode(tree: spliced, index: spliced.rootIndex)
+        let afterRoot = FileNode(tree: afterTree, index: afterTree.rootIndex)
+        XCTAssertEqual(splicedRoot.size, afterRoot.size, "splicing the directory holding the hardlink LOSER must not double-count the carrier living outside it")
+    }
+
+    // The mirrored case: splicing the directory holding the CARRIER must let
+    // the rescan re-take the full size for that (still 0-seeded-locally)
+    // ref, while the untouched outside 0-size twin correctly stays at 0.
+    func test_splice_of_directory_holding_hardlink_carrier_matches_full_rescan_total() async throws {
+        let (tmp, ref) = try makeHardlinkAcrossDirsFixture()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let before = await scanAndWait(tmp)
+        guard let beforeTree = await before.tree else { return XCTFail("initial scan should populate a tree") }
+        guard let carrierDirName = topLevelDirName(carryingRef: true, ref: ref, tree: beforeTree) else {
+            return XCTFail("expected to find the hardlink carrier in the initial scan")
+        }
+
+        guard let spliced = ScanViewModel.splicedTree(afterChangeAt: tmp.appendingPathComponent(carrierDirName).path, in: beforeTree) else {
+            return XCTFail("splice should succeed for a plain, non-summarized subdirectory")
+        }
+
+        let after = await scanAndWait(tmp)
+        guard let afterTree = await after.tree else { return XCTFail("second full rescan should populate a tree") }
+
+        let splicedRoot = FileNode(tree: spliced, index: spliced.rootIndex)
+        let afterRoot = FileNode(tree: afterTree, index: afterTree.rootIndex)
+        XCTAssertEqual(splicedRoot.size, afterRoot.size, "splicing the directory holding the hardlink CARRIER must still match a full fresh rescan's total")
+    }
 }
