@@ -223,7 +223,60 @@ final class AutoSummaryTests: XCTestCase {
         XCTAssertEqual(nmNode.size, hardlinkSize + otherSize, "the hardlinked pair must contribute its allocated bytes exactly once")
     }
 
-    // MARK: - 5. Env-gated benchmark
+    // MARK: - 5. Parallel walk matches a serial (autoSummarize off) scan
+
+    // Builds a moderately deep/wide tree that trips summarization (via a low
+    // MDS_SUMMARY_MIN_FILES override), scans it with autoSummarize on (which
+    // now drives the parallel worker pool in `summarizeSubtree`) and off
+    // (full, per-file walk), and asserts the summarized node's aggregate
+    // size and descendantFileCount exactly match the full scan's totals.
+    // This is a determinism/parity check for the parallel accumulator: since
+    // multiple workers race to discover directories/hardlinks, this is the
+    // test that would catch any double-counting or dropped entries the
+    // parallelization could introduce.
+    func test_parallel_summary_matches_serial_for_nested_tree() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        // Use the node_modules named-layout shortcut (rather than the
+        // immediate-file-count heuristic) so the tree can be wide - many
+        // independent "package" subdirectories, each with its own shallow
+        // nested chain - without needing files directly inside node_modules
+        // itself. Wide-and-shallow, rather than one long chained path, is
+        // what actually makes the parallel pool fan out across many workers
+        // while staying well under macOS's path-length limit.
+        let nodeModules = tmp.appendingPathComponent("proj").appendingPathComponent("node_modules")
+        var expectedTotal: Int64 = 0
+        for pkg in 0..<20 {
+            expectedTotal += try makeFiles(count: 20, bytes: 32, under: nodeModules.appendingPathComponent("pkg\(pkg)"), nestedEvery: 3)
+        }
+
+        guard let onRoot = await withExcludedFolderNames(".git,DerivedData,.Trash", {
+            await withAutoSummarize(true, { await scanTree(at: tmp) })
+        }) else {
+            return XCTFail("scan (autoSummarize on) produced no root")
+        }
+        guard let nmNode = findNode(onRoot, path: ["proj", "node_modules"]) else {
+            return XCTFail("node_modules node not found")
+        }
+        XCTAssertTrue(nmNode.isAutoSummarized, "node_modules-named directory should trip summarization")
+
+        guard let offRoot = await withExcludedFolderNames(".git,DerivedData,.Trash", {
+            await withAutoSummarize(false, { await scanTree(at: tmp) })
+        }) else {
+            return XCTFail("scan (autoSummarize off) produced no root")
+        }
+        guard let offNmNode = findNode(offRoot, path: ["proj", "node_modules"]) else {
+            return XCTFail("node_modules node not found in the non-summarized scan")
+        }
+
+        XCTAssertEqual(nmNode.size, expectedTotal, "parallel summary walk must total exactly the bytes on disk")
+        XCTAssertEqual(nmNode.descendantFileCount, 400, "parallel summary walk must count every file exactly once")
+        XCTAssertEqual(nmNode.size, offNmNode.size, "parallel summary result must match a full serial scan's size")
+        XCTAssertEqual(nmNode.descendantFileCount, totalAccountedFiles(offNmNode), "parallel summary result must match a full serial scan's file count")
+    }
+
+    // MARK: - 6. Env-gated benchmark
 
     func test_benchmark_autosummary() async throws {
         guard ProcessInfo.processInfo.environment["MDS_SUMMARY_BENCH"] == "1" else {
