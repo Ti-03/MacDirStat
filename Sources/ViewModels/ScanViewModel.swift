@@ -304,37 +304,197 @@ public final class ScanViewModel: ObservableObject {
         }
     }
 
-    // TODO(phase4): incremental splice refresh.
+    // Incremental splice refresh: for each directory FSEvents reports as
+    // changed, rescan just that directory from disk and splice the result
+    // into `tree` (see `Self.splicedTree(afterChangeAt:in:)` /
+    // `FileTree.replacingSubtree(at:with:)`) instead of rescanning the whole
+    // root, exactly like the "Move to Trash" prune path already avoids a
+    // full rescan for deletes. Multiple changed paths in one FSEvents batch
+    // are folded sequentially — each splice's result feeds the next lookup —
+    // which the plan explicitly allows as simpler than a single combined
+    // multi-directory splice, at the cost of a little redundant rescanning
+    // when a batch contains both a directory and one of its own descendants.
     //
-    // `FileTree`'s topology (parent/child arrays) is immutable for the life
-    // of one instance (that immutability is exactly what makes the flat
-    // arena cheap), so the old in-place FSNode mutation this method used to
-    // do (find the live node, patch its children/sizes) can no longer work
-    // directly against the live tree. The intended replacement (see the
-    // Phase 2 plan) is: for each changed directory, look up its index via a
-    // path->index map, re-scan just that directory into a fresh FSNode
-    // subtree (reusing `refreshDirectory`/`scanSubtree` below, which already
-    // do exactly this kind of on-disk rescan), convert it with
-    // `FileTreeBuilder`, and splice the result into a NEW `FileTree` that
-    // shares every untouched record/edge with the old one.
-    //
-    // That splice is a meaningful chunk of work on its own, so for this
-    // migration the interim (explicitly allowed by the plan) is simpler and
-    // still correct: any filesystem change under the watched root triggers a
-    // full rescan of the currently-scanned root, exactly like the "Move to
-    // Trash" actions elsewhere in the app already do after a delete. The
-    // FSNode-based helpers below (refreshDirectory/scanSubtree/bubbleUpSizes/
-    // findNode/firstNode) are kept exactly as they were — unused by this
-    // method for now, but still exercised directly by ScanRefreshTests /
-    // HiddenSpaceTests, and ready to be reused as the per-directory rescan
-    // step of the real splice in Phase 4.
-    private func handleFileSystemChanges(_ paths: [String]) async {
-        guard let scanURL else { return }
-        if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
-            let line = "REFRESH full-rescan changedPaths=\(paths.count) root=\(scanURL.path)\n"
-            FileHandle.standardError.write(line.data(using: .utf8)!)
+    // Falls back to a full rescan (unchanged from before) only for the cases
+    // a splice can't safely handle — see `splicedTree`'s doc comment: the
+    // root itself changed/vanished, a changed path no longer resolves
+    // anywhere in the tree, or it resolves into an auto-summarized node.
+    // Not `private`: exercised directly by IncrementalRefreshTests (via
+    // `@testable import`) to simulate an FSEvents batch deterministically,
+    // without needing a real FSEventStream round trip.
+    func handleFileSystemChanges(_ paths: [String]) async {
+        guard let scanURL, let startingTree = tree, !isReadOnlySnapshot else { return }
+
+        guard FileManager.default.fileExists(atPath: scanURL.path) else {
+            // The scanned root itself is gone (deleted/renamed/unmounted) —
+            // no subtree splice can recover from that.
+            if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
+                FileHandle.standardError.write("REFRESH fallback-full-rescan root-vanished root=\(scanURL.path)\n".data(using: .utf8)!)
+            }
+            scan(url: scanURL)
+            return
         }
-        scan(url: scanURL)
+
+        var workingTree = startingTree
+        for changedPath in paths {
+            guard let spliced = Self.splicedTree(afterChangeAt: changedPath, in: workingTree) else {
+                if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
+                    FileHandle.standardError.write("REFRESH fallback-full-rescan path=\(changedPath)\n".data(using: .utf8)!)
+                }
+                scan(url: scanURL)
+                return
+            }
+            workingTree = spliced
+        }
+
+        guard workingTree !== startingTree else { return } // nothing actually spliceable in this batch
+
+        if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
+            FileHandle.standardError.write("REFRESH spliced changedPaths=\(paths.count) root=\(scanURL.path)\n".data(using: .utf8)!)
+        }
+        await applySplicedTree(workingTree, from: startingTree)
+    }
+
+    // Rescans exactly the on-disk directory at `changedPath` (a full,
+    // synchronous walk via `scanSubtree`, the same per-directory rescan step
+    // the pre-Phase-2 refresh path used) and splices the result into `tree`,
+    // replacing its stale subtree in place — the cheap alternative to
+    // rescanning the whole root on every FSEvents notification.
+    //
+    // Returns nil when the splice can't be trusted, and the caller must fall
+    // back to a full rescan of the root instead:
+    //   - `changedPath` (after normalizing away a trailing slash) resolves
+    //     to the tree's own root — a changed root might mean the scanned
+    //     directory itself was replaced or renamed, which no subtree splice
+    //     can recover from.
+    //   - `changedPath` doesn't resolve to any node in `tree` at all: it (or
+    //     an ancestor) was deleted/renamed since the last refresh, or it
+    //     lives inside an auto-summarized directory, whose children were
+    //     never materialized in the first place — the path-component walk
+    //     simply runs out of children to match partway down.
+    //   - the resolved node is itself auto-summarized: it has no children
+    //     array to splice into (see AtomicDirectorySummary.swift) —
+    //     re-summarizing it in place is future work; falling back to a full
+    //     rescan is correct and simple for now.
+    //   - the freshly-rescanned replacement contains a directory the real
+    //     scanner's auto-summarization would have collapsed (named
+    //     "node_modules", mirroring `knownGeneratedDirectoryNames` in
+    //     AtomicDirectorySummary.swift) — `scanSubtree` below doesn't
+    //     implement that heuristic at all, so materializing it here would
+    //     both be slow and disagree with the rest of the tree's
+    //     summarization policy.
+    nonisolated static func splicedTree(afterChangeAt changedPath: String, in tree: FileTree) -> FileTree? {
+        let normalized = (changedPath.hasSuffix("/") && changedPath != "/") ? String(changedPath.dropLast()) : changedPath
+
+        guard var index = findIndex(forPath: normalized, in: tree) else { return nil }
+        // FSEvents (without the FileEvents flag, which this app doesn't
+        // request) reports directories, but be defensive: if this ever
+        // resolves to a file, the directory that actually needs rescanning
+        // is its parent.
+        if !tree.records[index].isDirectory {
+            let parent = tree.parentIndex[index]
+            guard parent >= 0 else { return nil }
+            index = parent
+        }
+        guard index != tree.rootIndex else { return nil }
+        guard !tree.records[index].isAutoSummarized else { return nil }
+
+        let node = FileNode(tree: tree, index: index)
+        let showHiddenFiles = UserDefaults.standard.bool(forKey: "showHiddenFiles")
+        let excludedNames = parseExcludedNames()
+        var seenRefs = Set<HardLinkRef>()
+        let freshNode = scanSubtree(
+            url: node.url,
+            parent: nil,
+            showHiddenFiles: showHiddenFiles,
+            excludedNames: excludedNames,
+            treeRoot: nil,
+            seenRefs: &seenRefs
+        )
+
+        guard freshNode.name != "node_modules", !containsUnsummarizedGeneratedDirectory(freshNode) else { return nil }
+
+        let subtree = FileTreeBuilder.build(from: freshNode, rootPath: node.url.path)
+        return tree.replacingSubtree(at: index, with: subtree)
+    }
+
+    // See the last bullet of `splicedTree`'s doc comment above.
+    private nonisolated static func containsUnsummarizedGeneratedDirectory(_ node: FSNode) -> Bool {
+        for child in node.children where child.isDirectory {
+            if child.name == "node_modules" || containsUnsummarizedGeneratedDirectory(child) {
+                return true
+            }
+        }
+        return false
+    }
+
+    // Repairs everything that referenced the old topology after one or more
+    // splices, mirroring `pruneTree(afterTrashing:from:)`: selection/drill
+    // stack are captured as paths beforehand and resolved back to indices
+    // afterward, since indices shift on every splice. The synthetic
+    // "Hidden & Unreadable Space" root child is never touched by any splice
+    // (it's a root-level child and a splice target is never the root — see
+    // `splicedTree`'s root guard — so it always survives untouched, no
+    // special-case re-appending needed here the way a full rescan needs
+    // `appendHiddenSpaceNodeIfNeeded`).
+    //
+    // Unlike a prune, a splice can introduce brand-new nodes (the freshly
+    // rescanned subtree), which start out `.caution`/no-duplicate-group from
+    // `FileTreeBuilder` — same as any fresh scan — so safety tagging and
+    // duplicate detection both re-run over the whole tree, exactly as they
+    // do after `scan(url:)`. Safety tagging is awaited synchronously before
+    // anything else touches `newTree.records`: it and `DuplicateDetector`
+    // both mutate that array in place, so — same reasoning as `scan(url:)` —
+    // they can't be allowed to run concurrently with each other.
+    private func applySplicedTree(_ newTree: FileTree, from oldTree: FileTree) async {
+        let selectedPath = selectedNode.map { oldTree.path(of: $0.index) }
+        let drillPaths = drillStack.map { oldTree.path(of: $0.index) }
+
+        await Task.detached(priority: .userInitiated) {
+            Self.tagSafetyLevels(tree: newTree)
+        }.value
+
+        self.tree = newTree
+
+        if let selectedPath, let idx = Self.findIndex(forPath: selectedPath, in: newTree) {
+            selectedNode = FileNode(tree: newTree, index: idx)
+        } else {
+            selectedNode = nil
+        }
+
+        var newDrillStack: [FileNode] = []
+        for path in drillPaths {
+            guard let idx = Self.findIndex(forPath: path, in: newTree) else { break }
+            newDrillStack.append(FileNode(tree: newTree, index: idx))
+        }
+        drillStack = newDrillStack
+
+        let rootNode = FileNode(tree: newTree, index: newTree.rootIndex)
+        let map = ExtensionColorMap(root: rootNode)
+        colorMap = map
+
+        extensionTask?.cancel()
+        extensionTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let summaries = Self.buildExtensionSummaries(tree: newTree, map: map)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self?.extensionSummaries = summaries }
+        }
+
+        duplicateTask?.cancel()
+        duplicateTask = Task.detached(priority: .utility) { [weak self] in
+            let detector = DuplicateDetector()
+            await detector.detect(in: newTree)
+            guard !Task.isCancelled else { return }
+            let groups = Self.buildDuplicateGroups(tree: newTree)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.duplicatesReady = true
+                self?.duplicateGroups = groups
+            }
+        }
+
+        isComputingLayout = true
+        await recomputeLayout()
     }
 
     // Walk the tree by path components to find the FSNode for a given path.
