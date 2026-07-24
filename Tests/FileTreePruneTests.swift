@@ -351,6 +351,78 @@ final class FileTreePruneTests: XCTestCase {
         XCTAssertEqual(newTwinB.size, 300, "twinB must be promoted with its own pair's size, independently of twinA")
         assertValidTopology(pruned)
     }
+
+    // MARK: - removingSubtrees: removed node's own ancestor chain must stay sorted (BUG 2 / FIX 2)
+
+    // The plan's exact repro:
+    //   root
+    //    ├─ P                                  size 900
+    //    │   ├─ A (dir, size 500)
+    //    │   │    └─ big.bin (500, ref R, carrier)
+    //    │   └─ C (dir, size 400, untouched)
+    //    │        └─ other.bin (400, unrelated)
+    //    └─ Q (dir, size 0)
+    //         └─ twin.bin (0, ref R)
+    // `P.children` starts `[A(500), C(400)]`. Removing `big.bin` promotes
+    // twin.bin to 500 (A's own promotion-resort logic already covers Q's and
+    // root's spans), but A itself drops straight to 0 — nothing in the old
+    // code re-sorted P's span to reflect that, leaving `P.children ==
+    // [A(0), C(400)]`, which violates the size-desc invariant even though
+    // this has nothing to do with hardlinks (a plain size *shrink* would
+    // trigger the exact same gap; the hardlink promotion path just makes a
+    // 500->0 drop easy to construct in one step).
+    private func makeAncestorResortFixture() -> (root: FSNode, dirP: FSNode, dirA: FSNode, big: FSNode, dirC: FSNode, other: FSNode, dirQ: FSNode, twin: FSNode) {
+        let ref = HardLinkRef(dev: 1, ino: 77)
+        let root = FSNode(url: URL(fileURLWithPath: "/scan"), name: "scan", isDirectory: true, size: 0, fileExtension: "", parent: nil)
+
+        let dirP = FSNode(url: URL(fileURLWithPath: "/scan/P"), name: "P", isDirectory: true, size: 900, fileExtension: "", parent: root)
+        let dirA = FSNode(url: URL(fileURLWithPath: "/scan/P/A"), name: "A", isDirectory: true, size: 500, fileExtension: "", parent: dirP)
+        let big = FSNode(url: URL(fileURLWithPath: "/scan/P/A/big.bin"), name: "big.bin", isDirectory: false, size: 500, fileExtension: "bin", parent: dirA)
+        big.hardLinkRef = ref
+        dirA.children = [big]
+        let dirC = FSNode(url: URL(fileURLWithPath: "/scan/P/C"), name: "C", isDirectory: true, size: 400, fileExtension: "", parent: dirP)
+        let other = FSNode(url: URL(fileURLWithPath: "/scan/P/C/other.bin"), name: "other.bin", isDirectory: false, size: 400, fileExtension: "bin", parent: dirC)
+        dirC.children = [other]
+        dirP.children = [dirA, dirC] // sorted size-desc: A(500), C(400)
+
+        let dirQ = FSNode(url: URL(fileURLWithPath: "/scan/Q"), name: "Q", isDirectory: true, size: 0, fileExtension: "", parent: root)
+        let twin = FSNode(url: URL(fileURLWithPath: "/scan/Q/twin.bin"), name: "twin.bin", isDirectory: false, size: 0, fileExtension: "bin", parent: dirQ)
+        twin.hardLinkRef = ref
+        dirQ.children = [twin]
+
+        root.children = [dirP, dirQ]
+        root.size = dirP.size + dirQ.size
+        return (root, dirP, dirA, big, dirC, other, dirQ, twin)
+    }
+
+    func test_removingSubtree_resorts_removed_nodes_own_ancestor_chain_after_carrier_shrinks_to_zero() {
+        let (root, dirP, _, big, _, _, _, _) = makeAncestorResortFixture()
+        let tree = FileTreeBuilder.build(from: root, rootPath: "/scan")
+        let bigNode = node(named: "big.bin", in: tree)
+        _ = dirP
+
+        let pruned = tree.removingSubtree(at: bigNode.index)
+
+        let newRoot = FileNode(tree: pruned, index: pruned.rootIndex)
+        let newP = newRoot.children.first { $0.name == "P" }!
+        XCTAssertEqual(
+            newP.children.map(\.name),
+            ["C", "A"],
+            "P's children must stay sorted size-desc after A drops from 500 to 0 (C is now the bigger sibling)"
+        )
+        let newA = newP.children.first { $0.name == "A" }!
+        XCTAssertEqual(newA.size, 0)
+        let newC = newP.children.first { $0.name == "C" }!
+        XCTAssertEqual(newC.size, 400, "C must be completely untouched")
+
+        // The promoted twin's side must still be correct too (BUG 1's own
+        // invariant), and every node in the whole tree — not just P — must
+        // satisfy the size-desc + topology invariants.
+        let newQ = newRoot.children.first { $0.name == "Q" }!
+        XCTAssertEqual(newQ.size, 500)
+        XCTAssertEqual(newRoot.size, 900, "root total must be unchanged — the bytes just moved from A's side to Q's side")
+        assertValidTopology(pruned)
+    }
 }
 
 // MARK: - ScanViewModel-level integration

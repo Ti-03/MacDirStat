@@ -230,11 +230,21 @@ public final class FileTree: @unchecked Sendable {
             guard let survivorOld = survivorTwinByRef[ref] else { continue } // no survivor -> no promotion
             promotions.append((survivorOld, records[old].size))
         }
+        // Every span a size change below could disturb, collected as we go
+        // and deduped (a promotion and a plain subtraction can easily share
+        // ancestors, e.g. root) so each span is only ever re-sorted once at
+        // the end, after `newChildIndices` exists to sort.
+        var resortTargets = Set<Int>()
+
         for (survivorOld, size) in promotions {
             newRecords[oldToNew[survivorOld]].size = size
+            // The promoted twin's own parent span (one member jumped from 0
+            // to `size`) and every ancestor above it up to root — same
+            // members up there, but one of them now has a different size.
             var ancestorOld = parentIndex[survivorOld]
             while ancestorOld >= 0 {
                 newRecords[oldToNew[ancestorOld]].size += size
+                resortTargets.insert(oldToNew[ancestorOld])
                 ancestorOld = parentIndex[ancestorOld]
             }
         }
@@ -246,6 +256,17 @@ public final class FileTree: @unchecked Sendable {
         // already folded into the ancestor chain when that higher seed was
         // processed, so subtracting again here would double-count. Also
         // de-dupe in case the same index appears more than once in `indices`.
+        //
+        // FIX 2: every ancestor visited here also goes into `resortTargets`.
+        // The removed seed's immediate parent just shrank (possibly straight
+        // to 0), which can leave it out of order within ITS OWN parent's
+        // span — a pre-existing gap in this plain-subtraction path (nothing
+        // to do with hardlinks) that survivor promotion just makes easy to
+        // trigger, since a directory's size can drop straight to 0 while an
+        // untouched sibling stays put. Including the shrunk node's own span
+        // too is harmless (it's already correctly ordered by the child-span
+        // rebuild below), but keeping it in the same set as the ancestors
+        // above it is what actually fixes the sibling ordering.
         var processedRoots = Set<Int>()
         for seed in indices {
             guard seed != rootIndex, seed >= 0, seed < count, removed[seed] else { continue }
@@ -257,6 +278,7 @@ public final class FileTree: @unchecked Sendable {
             var ancestorOld = parent
             while ancestorOld >= 0 {
                 newRecords[oldToNew[ancestorOld]].size -= removedSize
+                resortTargets.insert(oldToNew[ancestorOld])
                 ancestorOld = parentIndex[ancestorOld]
             }
         }
@@ -284,30 +306,7 @@ public final class FileTree: @unchecked Sendable {
             newChildCount[newIdx] = kept
         }
 
-        // Re-sort every ancestor span a promotion could have disturbed: the
-        // promoted twin's own parent (one member jumped from 0 to `size`)
-        // and every ancestor above it up to root (same members, but one now
-        // has a different size) — same reasoning as `replacingSubtree`'s own
-        // ancestor re-sort below. Deduped across promotions since several
-        // independent hardlink pairs can share ancestors (e.g. root).
-        if !promotions.isEmpty {
-            var ancestorNewIndices = Set<Int>()
-            for (survivorOld, _) in promotions {
-                var a = parentIndex[survivorOld]
-                while a >= 0 {
-                    ancestorNewIndices.insert(oldToNew[a])
-                    a = parentIndex[a]
-                }
-            }
-            for newIdx in ancestorNewIndices {
-                let start = newChildStart[newIdx]
-                let cnt = newChildCount[newIdx]
-                guard cnt > 1 else { continue }
-                var slice = Array(newChildIndices[start..<(start + cnt)])
-                slice.sort { newRecords[$0].size > newRecords[$1].size }
-                newChildIndices.replaceSubrange(start..<(start + cnt), with: slice)
-            }
-        }
+        Self.resortSpans(resortTargets, records: newRecords, childStart: newChildStart, childCount: newChildCount, into: &newChildIndices)
 
         return FileTree(
             records: newRecords,
@@ -318,6 +317,24 @@ public final class FileTree: @unchecked Sendable {
             rootIndex: oldToNew[rootIndex],
             rootPath: rootPath
         )
+    }
+
+    // Shared ancestor-resort helper used by `removingSubtrees`,
+    // `replacingSubtree`, and `promotingSurvivingTwin`: re-sorts the child
+    // span at each index in `targets` by size descending, in place. All
+    // three only ever need to re-sort a handful of ancestor spans a size
+    // change could have disturbed, never the whole tree, so this stays
+    // proportional to tree depth × number of affected chains rather than
+    // total node count.
+    private static func resortSpans<S: Sequence>(_ targets: S, records: [FileNodeRecord], childStart: [Int], childCount: [Int], into childIndices: inout [Int]) where S.Element == Int {
+        for newIdx in targets {
+            let start = childStart[newIdx]
+            let cnt = childCount[newIdx]
+            guard cnt > 1 else { continue }
+            var slice = Array(childIndices[start..<(start + cnt)])
+            slice.sort { records[$0].size > records[$1].size }
+            childIndices.replaceSubrange(start..<(start + cnt), with: slice)
+        }
     }
 
     // MARK: - Splice (incremental live-refresh, replacing the full-rescan interim)
@@ -447,14 +464,7 @@ public final class FileTree: @unchecked Sendable {
             ancestorNewIndices.append(oldToNew[a])
             a = parentIndex[a]
         }
-        for newIdx in ancestorNewIndices {
-            let start = newChildStart[newIdx]
-            let cnt = newChildCount[newIdx]
-            guard cnt > 1 else { continue }
-            var slice = Array(newChildIndices[start..<(start + cnt)])
-            slice.sort { newRecords[$0].size > newRecords[$1].size }
-            newChildIndices.replaceSubrange(start..<(start + cnt), with: slice)
-        }
+        Self.resortSpans(ancestorNewIndices, records: newRecords, childStart: newChildStart, childCount: newChildCount, into: &newChildIndices)
 
         return FileTree(
             records: newRecords,
@@ -508,14 +518,7 @@ public final class FileTree: @unchecked Sendable {
         }
 
         var newChildIndices = childIndices
-        for newIdx in resortTargets {
-            let start = childStart[newIdx]
-            let cnt = childCount[newIdx]
-            guard cnt > 1 else { continue }
-            var slice = Array(newChildIndices[start..<(start + cnt)])
-            slice.sort { newRecords[$0].size > newRecords[$1].size }
-            newChildIndices.replaceSubrange(start..<(start + cnt), with: slice)
-        }
+        Self.resortSpans(resortTargets, records: newRecords, childStart: childStart, childCount: childCount, into: &newChildIndices)
 
         return FileTree(
             records: newRecords,
