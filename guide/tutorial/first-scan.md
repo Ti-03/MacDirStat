@@ -6,7 +6,9 @@ you will have scanned a real folder and seen its contents as a treemap.
 ## Before you start
 
 You need MacDirStat installed and a folder you are curious about, for
-example your Downloads folder.
+example your Downloads folder. If you have not installed it yet,
+[download MacDirStat](https://ti-03.github.io/MacDirStat/) from the project
+page first.
 
 ## 1. Open MacDirStat
 

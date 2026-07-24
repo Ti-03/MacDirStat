@@ -9,6 +9,11 @@ what a specific API does. You do not need any Swift experience to follow the
 tutorial or how-to guide; the reference section assumes you are reading the
 Swift source.
 
+Not installed yet? [Download MacDirStat](https://ti-03.github.io/MacDirStat/)
+from the project page, or build it from source by cloning the
+[repository](https://github.com/Ti-03/MacDirStat) and opening
+`MacDirStat.xcodeproj` in Xcode.
+
 - New to MacDirStat? Start with the [tutorial](tutorial/first-scan.md).
 - Trying to make sense of the colors in the chart? Read
   [How to read the treemap](how-to/read-the-treemap.md).
