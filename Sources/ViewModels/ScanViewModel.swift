@@ -30,6 +30,13 @@ public final class ScanViewModel: ObservableObject {
     // drives the read-only banner in ContentView.
     @Published public var isReadOnlySnapshot: Bool = false
     @Published public var snapshotDate: Date?
+    // Result of "Compare With Saved Scan…" (4c): diffing the currently
+    // loaded tree against a `.mdscan` archive picked from disk. Entirely
+    // separate from `isReadOnlySnapshot`/`tree` — comparing never replaces
+    // the active tree, it only produces a side-by-side report.
+    @Published public var comparisonResult: ComparisonResult?
+    @Published public var isComputingComparison: Bool = false
+    @Published public var showComparisonSheet: Bool = false
 
     public var root: FileNode? { tree.map { FileNode(tree: $0, index: $0.rootIndex) } }
     public var treemapRoot: FileNode? { drillStack.last ?? root }
@@ -927,6 +934,52 @@ public final class ScanViewModel: ObservableObject {
 
         duplicateGroups = Self.buildDuplicateGroups(tree: tree)
         duplicatesReady = true
+    }
+
+    // MARK: - Compare two scans (4c)
+
+    // What `ComparisonView` renders: the diff itself plus enough context
+    // about the "before" side (it was loaded from an archive, not the live
+    // tree) to label the report meaningfully.
+    public struct ComparisonResult: Sendable {
+        public let changes: [ScanChange]
+        public let beforeMetadata: ScanArchive.Metadata
+        public let afterRootPath: String
+    }
+
+    // Loads `archiveURL` as the "before" snapshot and diffs it against the
+    // currently active tree ("after"), off the main actor — decoding a large
+    // archive and walking two multi-million-node trees is real work. Never
+    // mutates `tree`/`isReadOnlySnapshot`: this is a read-only side report,
+    // wholly independent of whatever is currently loaded/live-watched.
+    public func compareWithSavedScan(archiveURL: URL) {
+        guard let afterTree = tree else { return }
+        errorMessage = nil
+        isComputingComparison = true
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let data = try Data(contentsOf: archiveURL)
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                let archive = try decoder.decode(ScanArchive.self, from: data)
+                try archive.validate()
+                let beforeTree = archive.makeTree()
+                let changes = ScanComparison.compare(before: beforeTree, after: afterTree)
+                let result = ComparisonResult(changes: changes, beforeMetadata: archive.metadata, afterRootPath: afterTree.rootPath)
+                await MainActor.run {
+                    guard let self else { return }
+                    self.comparisonResult = result
+                    self.isComputingComparison = false
+                    self.showComparisonSheet = true
+                }
+            } catch {
+                await MainActor.run {
+                    self?.isComputingComparison = false
+                    self?.errorMessage = "Couldn't compare scan: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     public func exportCSV() {

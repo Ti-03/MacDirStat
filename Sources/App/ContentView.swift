@@ -113,6 +113,9 @@ struct ContentView: View {
         .sheet(isPresented: $vm.showFDASheet) {
             FullDiskAccessSheet()
         }
+        .sheet(isPresented: $vm.showComparisonSheet) {
+            ComparisonView()
+        }
     }
 
     // MARK: - Tab picker

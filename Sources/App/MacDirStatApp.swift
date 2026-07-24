@@ -43,6 +43,12 @@ struct MacDirStatApp: App {
                     NotificationCenter.default.post(name: .exportCSV, object: nil)
                 }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
+
+                Button("Compare With Saved Scan…") {
+                    compareWithSavedScanPicker(vm: vm)
+                }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
+                .disabled(vm.tree == nil)
             }
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") {
@@ -103,5 +109,20 @@ private func openArchivePicker(vm: ScanViewModel) {
     panel.message = "Choose a saved scan to reopen as a read-only snapshot"
     if panel.runModal() == .OK, let url = panel.url {
         vm.openArchive(from: url)
+    }
+}
+
+@MainActor
+private func compareWithSavedScanPicker(vm: ScanViewModel) {
+    guard vm.tree != nil else { return }
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = false
+    panel.canChooseFiles = true
+    panel.allowsMultipleSelection = false
+    panel.allowedContentTypes = [mdscanType]
+    panel.prompt = "Compare"
+    panel.message = "Choose a saved scan to compare against the current one"
+    if panel.runModal() == .OK, let url = panel.url {
+        vm.compareWithSavedScan(archiveURL: url)
     }
 }
