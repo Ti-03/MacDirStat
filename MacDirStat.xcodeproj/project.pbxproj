@@ -33,6 +33,8 @@
 		E5BB63BED418F08CF4727F72 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 783902530DE4EA8040806BC9 /* SettingsView.swift */; };
 		F81DF36922942E2F442814A3 /* TreemapLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAB4247FB8E3E3FB5AF053F9 /* TreemapLayout.swift */; };
 		FB3E660E0C4E74F2A9EFBEF0 /* FileScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDD56FD4714436315629F989 /* FileScanner.swift */; };
+		A1B2C3D4E5F600112233445A /* BulkDirectoryEnumerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F600112233445B /* BulkDirectoryEnumerator.swift */; };
+		A1B2C3D4E5F600112233445C /* AtomicDirectorySummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F600112233445D /* AtomicDirectorySummary.swift */; };
 		FD11F6ED4164F05503706848 /* ExtensionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 987EDA67820F162556A7CA53 /* ExtensionListView.swift */; };
 		84449F67C7DF40C737411C80 /* FileTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B5ADD782F265EBF4B1037EE /* FileTree.swift */; };
 		A498AC088B1E3C6E1B255BC2 /* FileNode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9429B8A593856D8B12941F49 /* FileNode.swift */; };
@@ -70,6 +72,8 @@
 		C40A6B24C517964825BA4B85 /* TreemapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreemapView.swift; sourceTree = "<group>"; };
 		DBCAD22DB54E68077B842421 /* ScanProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanProgress.swift; sourceTree = "<group>"; };
 		DDD56FD4714436315629F989 /* FileScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileScanner.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F600112233445B /* BulkDirectoryEnumerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BulkDirectoryEnumerator.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F600112233445D /* AtomicDirectorySummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AtomicDirectorySummary.swift; sourceTree = "<group>"; };
 		EE11223344556677889900EE /* FileWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileWatcher.swift; sourceTree = "<group>"; };
 		F6ADF08FD012926F8704A51C /* MacDirStat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MacDirStat.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1B5ADD782F265EBF4B1037EE /* FileTree.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTree.swift; sourceTree = "<group>"; };
@@ -137,6 +141,8 @@
 			isa = PBXGroup;
 			children = (
 				DDD56FD4714436315629F989 /* FileScanner.swift */,
+				A1B2C3D4E5F600112233445B /* BulkDirectoryEnumerator.swift */,
+				A1B2C3D4E5F600112233445D /* AtomicDirectorySummary.swift */,
 				35F5AEBBF9DECB5CB793339A /* FSNode.swift */,
 				EE11223344556677889900EE /* FileWatcher.swift */,
 				DBCAD22DB54E68077B842421 /* ScanProgress.swift */,
@@ -355,6 +361,8 @@
 				AA11223344556677889900AA /* SafetyAnalyzer.swift in Sources */,
 				DD11223344556677889900DD /* FileWatcher.swift in Sources */,
 				FB3E660E0C4E74F2A9EFBEF0 /* FileScanner.swift in Sources */,
+				A1B2C3D4E5F600112233445A /* BulkDirectoryEnumerator.swift in Sources */,
+				A1B2C3D4E5F600112233445C /* AtomicDirectorySummary.swift in Sources */,
 				3881FC74433C93187BF941AF /* FSNode.swift in Sources */,
 				86B25923164A00AB10D72C9B /* ScanProgress.swift in Sources */,
 				114A022A9D8A4529EC91BC12 /* ScanViewModel.swift in Sources */,
