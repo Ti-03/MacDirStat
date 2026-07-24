@@ -104,7 +104,21 @@ MacDirStat collects zero data. No network access. No analytics. No tracking. Eve
 
 ## Contributing
 
-PRs welcome. Open an issue first for anything beyond a bug fix.
+PRs welcome. Open an issue first for anything beyond a bug fix. Setup, test
+commands, PR conventions, and review expectations are in
+[CONTRIBUTING.md](CONTRIBUTING.md); how decisions get made is in
+[GOVERNANCE.md](GOVERNANCE.md).
+
+## License
+
+Copyright © 2026 Qutibah Ananzeh (Ti-03).
+
+MacDirStat is licensed under the [GNU AGPL-3.0](LICENSE): use it, read it,
+modify it, but if you distribute a modified version (or host one as a
+service), your changes must stay open under the same license. The Mac App
+Store build is distributed by the copyright holder, which is what makes the
+combination possible; see [CONTRIBUTING.md](CONTRIBUTING.md) for what that
+means for contributions.
 
 ---
 
