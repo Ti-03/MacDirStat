@@ -132,4 +132,123 @@ public final class FileTree: @unchecked Sendable {
             rootPath: rootPath
         )
     }
+
+    // MARK: - Pruning (Move to Trash without a full rescan)
+
+    // Returns a NEW tree with the subtree rooted at `index` removed (the root
+    // itself can never be removed — returns `self` unchanged if asked to).
+    // Thin wrapper over `removingSubtrees(at:)`, which already handles the
+    // single-index case without any extra cost.
+    public func removingSubtree(at index: Int) -> FileTree {
+        removingSubtrees(at: [index])
+    }
+
+    // Returns a NEW tree with every subtree rooted at each of `indices`
+    // removed — the "Delete All Duplicates" / "keep 1, delete N" case, where
+    // several unrelated nodes are trashed at once.
+    //
+    // Single pass over all indices (not a fold of `removingSubtree` calls one
+    // at a time): every seed's whole subtree is marked in one iterative DFS,
+    // then `records`/`parentIndex`/children are rebuilt once from the
+    // resulting old->new index map. This is O(n) total rather than O(n·k)
+    // for k removed subtrees, while remaining just as simple to reason about
+    // as folding would be (a fold is also correct here — just slower).
+    public func removingSubtrees(at indices: [Int]) -> FileTree {
+        let count = records.count
+
+        // Mark every node in each seed's subtree as removed via an iterative
+        // DFS over childIndices (explicit stack, not recursion, so this can't
+        // stack-overflow on a very deep real-world tree).
+        var removed = [Bool](repeating: false, count: count)
+        var stack: [Int] = []
+        for seed in indices where seed != rootIndex && seed >= 0 && seed < count && !removed[seed] {
+            stack.append(seed)
+        }
+        while let i = stack.popLast() {
+            if removed[i] { continue }
+            removed[i] = true
+            let start = childStart[i]
+            let cnt = childCount[i]
+            for offset in 0..<cnt {
+                stack.append(childIndices[start + offset])
+            }
+        }
+
+        // Nothing valid to remove (empty/out-of-range/root-only indices) —
+        // return the same instance rather than a redundant identical copy.
+        guard removed.contains(true) else { return self }
+
+        // Old -> new index map over kept nodes, built in ascending old-index
+        // order — this is what keeps every child span's relative order
+        // (already size-desc) intact after dropping the removed entries.
+        var oldToNew = [Int](repeating: -1, count: count)
+        var newRecords: [FileNodeRecord] = []
+        newRecords.reserveCapacity(count)
+        for old in 0..<count where !removed[old] {
+            oldToNew[old] = newRecords.count
+            newRecords.append(records[old])
+        }
+
+        var newParentIndex = [Int](repeating: -1, count: newRecords.count)
+        for old in 0..<count where !removed[old] {
+            let newIdx = oldToNew[old]
+            let oldParent = parentIndex[old]
+            newParentIndex[newIdx] = oldParent >= 0 ? oldToNew[oldParent] : -1
+        }
+
+        // Subtract each removed subtree's root size from every one of its
+        // ancestors. Only process seeds whose immediate parent is NOT itself
+        // removed — if the parent is removed too, this seed is a descendant
+        // of some other (higher) removed subtree root, and its size was
+        // already folded into the ancestor chain when that higher seed was
+        // processed, so subtracting again here would double-count. Also
+        // de-dupe in case the same index appears more than once in `indices`.
+        var processedRoots = Set<Int>()
+        for seed in indices {
+            guard seed != rootIndex, seed >= 0, seed < count, removed[seed] else { continue }
+            let parent = parentIndex[seed]
+            if parent >= 0 && removed[parent] { continue }
+            guard processedRoots.insert(seed).inserted else { continue }
+
+            let removedSize = records[seed].size
+            var ancestorOld = parent
+            while ancestorOld >= 0 {
+                newRecords[oldToNew[ancestorOld]].size -= removedSize
+                ancestorOld = parentIndex[ancestorOld]
+            }
+        }
+
+        // Rebuild children arrays, dropping removed entries from each
+        // surviving parent's span but keeping the rest in their original
+        // (size-desc) relative order.
+        var newChildIndices: [Int] = []
+        newChildIndices.reserveCapacity(childIndices.count)
+        var newChildStart = [Int](repeating: 0, count: newRecords.count)
+        var newChildCount = [Int](repeating: 0, count: newRecords.count)
+        for old in 0..<count where !removed[old] {
+            let newIdx = oldToNew[old]
+            newChildStart[newIdx] = newChildIndices.count
+            let start = childStart[old]
+            let cnt = childCount[old]
+            var kept = 0
+            for offset in 0..<cnt {
+                let childOld = childIndices[start + offset]
+                if !removed[childOld] {
+                    newChildIndices.append(oldToNew[childOld])
+                    kept += 1
+                }
+            }
+            newChildCount[newIdx] = kept
+        }
+
+        return FileTree(
+            records: newRecords,
+            parentIndex: newParentIndex,
+            childStart: newChildStart,
+            childCount: newChildCount,
+            childIndices: newChildIndices,
+            rootIndex: oldToNew[rootIndex],
+            rootPath: rootPath
+        )
+    }
 }

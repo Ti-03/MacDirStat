@@ -205,10 +205,7 @@ struct TreemapView: View {
             Divider()
 
             Button(role: .destructive) {
-                do {
-                    try FileManager.default.trashItem(at: node.url, resultingItemURL: nil)
-                    if let root = vm.root { vm.scan(url: root.url) }
-                } catch {}
+                vm.trashNode(node)
             } label: {
                 Label("Move to Trash", systemImage: "trash")
             }

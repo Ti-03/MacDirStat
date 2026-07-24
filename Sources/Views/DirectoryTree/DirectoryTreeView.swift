@@ -42,10 +42,7 @@ struct DirectoryTreeView: View {
                             }
                             Divider()
                             Button(role: .destructive) {
-                                if let _ = try? FileManager.default.trashItem(at: node.url, resultingItemURL: nil),
-                                   let root = vm.root {
-                                    vm.scan(url: root.url)
-                                }
+                                vm.trashNode(node)
                             } label: {
                                 Label("Move to Trash", systemImage: "trash")
                             }

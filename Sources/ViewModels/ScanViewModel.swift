@@ -629,6 +629,122 @@ public final class ScanViewModel: ObservableObject {
         Task { await recomputeLayout() }
     }
 
+    // MARK: - Move to Trash (prune-in-place, no rescan)
+
+    // Moves a single node to the Trash and, if that succeeds, prunes it out
+    // of the in-memory tree instead of triggering a full rescan. Returns
+    // whether anything was actually trashed (mirrors the old call sites'
+    // `try?`-and-check pattern).
+    @discardableResult
+    public func trashNode(_ node: FileNode) -> Bool {
+        trashNodes([node])
+    }
+
+    // Moves several nodes to the Trash (the "keep 1, delete N" / "Delete All
+    // Duplicates" case) and prunes every successfully-trashed one out of the
+    // tree in a single splice, rather than rescanning once per node.
+    @discardableResult
+    public func trashNodes(_ nodes: [FileNode]) -> Bool {
+        guard let currentTree = tree, !nodes.isEmpty else { return false }
+
+        var trashedIndices: [Int] = []
+        trashedIndices.reserveCapacity(nodes.count)
+        for node in nodes where ObjectIdentifier(node.tree) == ObjectIdentifier(currentTree) {
+            do {
+                try FileManager.default.trashItem(at: node.url, resultingItemURL: nil)
+                trashedIndices.append(node.index)
+            } catch {
+                // Swallow, same as the old per-call-site `try?` behavior —
+                // one failed delete (e.g. permissions) shouldn't block the
+                // rest of the batch or surface a blocking alert.
+            }
+        }
+        guard !trashedIndices.isEmpty else { return false }
+
+        pruneTree(afterTrashing: trashedIndices, from: currentTree)
+        return true
+    }
+
+    // Splices the trashed nodes out of `tree` and repairs everything that
+    // referenced the old topology: selection, drill stack, color map,
+    // extension summaries, duplicate groups, and layout. Indices shift on
+    // every prune, so selection/drill state is captured as paths beforehand
+    // and resolved back to indices in the new tree afterward.
+    private func pruneTree(afterTrashing indices: [Int], from oldTree: FileTree) {
+        let selectedPath = selectedNode.map { oldTree.path(of: $0.index) }
+        let drillPaths = drillStack.map { oldTree.path(of: $0.index) }
+
+        let newTree = oldTree.removingSubtrees(at: indices)
+        self.tree = newTree
+
+        if let selectedPath, let idx = Self.findIndex(forPath: selectedPath, in: newTree) {
+            selectedNode = FileNode(tree: newTree, index: idx)
+        } else {
+            selectedNode = nil
+        }
+
+        // Keep every prefix of the drill stack that still resolves; the
+        // first missing entry (the trashed directory itself, if it was
+        // drilled into) truncates the stack back to its nearest surviving
+        // ancestor instead of leaving stale/dangling entries.
+        var newDrillStack: [FileNode] = []
+        for path in drillPaths {
+            guard let idx = Self.findIndex(forPath: path, in: newTree) else { break }
+            newDrillStack.append(FileNode(tree: newTree, index: idx))
+        }
+        drillStack = newDrillStack
+
+        let rootNode = FileNode(tree: newTree, index: newTree.rootIndex)
+        let map = ExtensionColorMap(root: rootNode)
+        colorMap = map
+
+        // Safety tags and duplicateGroupIDs are per-node fields that were
+        // already computed on the surviving records and carry over as-is
+        // through the splice (removingSubtrees copies whole `FileNodeRecord`
+        // values), so only the two aggregate derived passes need to re-run —
+        // and neither needs a full re-detect, just a re-group/re-bucket over
+        // the pruned record set.
+        extensionTask?.cancel()
+        extensionTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let summaries = Self.buildExtensionSummaries(tree: newTree, map: map)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self?.extensionSummaries = summaries }
+        }
+
+        duplicateTask?.cancel()
+        duplicateTask = Task.detached(priority: .utility) { [weak self] in
+            let groups = Self.buildDuplicateGroups(tree: newTree)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self?.duplicateGroups = groups }
+        }
+
+        Task { await recomputeLayout() }
+    }
+
+    // Resolves an absolute path back to an index in `tree` by walking
+    // root->leaf name components (no full-tree path map to build — this is
+    // only ever called for a handful of paths per prune: selection + drill
+    // stack). Returns nil if the path no longer exists (it was the node
+    // that got trashed, or a descendant of it).
+    private nonisolated static func findIndex(forPath path: String, in tree: FileTree) -> Int? {
+        if path == tree.rootPath { return tree.rootIndex }
+        let rootPrefix = tree.rootPath.hasSuffix("/") ? tree.rootPath : tree.rootPath + "/"
+        guard path.hasPrefix(rootPrefix) else { return nil }
+
+        let relative = String(path.dropFirst(rootPrefix.count))
+        let components = relative.split(separator: "/").map(String.init)
+        var current = tree.rootIndex
+        for component in components {
+            let start = tree.childStart[current]
+            let count = tree.childCount[current]
+            guard let offset = (0..<count).first(where: { tree.records[tree.childIndices[start + $0]].name == component }) else {
+                return nil
+            }
+            current = tree.childIndices[start + offset]
+        }
+        return current
+    }
+
     // Whole-tree aggregate: a flat loop over `tree.records` reaches every
     // node without recursion, since the array already covers the entire
     // tree regardless of hierarchy.

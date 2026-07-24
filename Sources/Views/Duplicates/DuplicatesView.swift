@@ -74,34 +74,15 @@ struct DuplicatesView: View {
     // MARK: - Delete helpers
 
     private func deleteAll(groups: [[FileNode]]) {
-        guard let rootURL = vm.root?.url else { return }
-        var deleted = false
-        for group in groups {
-            for node in group.dropFirst() {
-                if (try? FileManager.default.trashItem(at: node.url, resultingItemURL: nil)) != nil {
-                    deleted = true
-                }
-            }
-        }
-        if deleted { vm.scan(url: rootURL) }
+        vm.trashNodes(groups.flatMap { $0.dropFirst() })
     }
 
     private func deleteGroup(_ group: [FileNode]) {
-        guard let rootURL = vm.root?.url else { return }
-        var deleted = false
-        for node in group.dropFirst() {
-            if (try? FileManager.default.trashItem(at: node.url, resultingItemURL: nil)) != nil {
-                deleted = true
-            }
-        }
-        if deleted { vm.scan(url: rootURL) }
+        vm.trashNodes(Array(group.dropFirst()))
     }
 
     private func deleteNode(_ node: FileNode) {
-        guard let rootURL = vm.root?.url else { return }
-        if (try? FileManager.default.trashItem(at: node.url, resultingItemURL: nil)) != nil {
-            vm.scan(url: rootURL)
-        }
+        vm.trashNode(node)
     }
 }
 
