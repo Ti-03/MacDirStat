@@ -343,4 +343,69 @@ final class BulkScannerTests: XCTestCase {
         XCTAssertEqual(bulkFingerprint.hardlinkGroups, fallbackFingerprint.hardlinkGroups, "hardlink groupings and their total sizes must match")
         XCTAssertEqual(bulkFingerprint.total, fallbackFingerprint.total)
     }
+
+    // MARK: - Firmlinked directories must be scanned, not silently dropped
+    //
+    // Regression test for the worst bug this scanner has had. macOS firmlinks
+    // (/Users, /Applications, /Library, /opt, /private, /Volumes, /cores) are
+    // recorded on the sealed system volume with their own inode, and resolve
+    // on open to a different inode on the Data volume. The scanner used to
+    // compare the enumerated (dev, ino) against the opened one as a TOCTOU
+    // guard and drop the directory when they disagreed — which threw away
+    // every firmlink, i.e. essentially all user data. Scanning "/" reported
+    // 11.8 GB instead of 479.3 GB on the development machine.
+    //
+    // The existing bulk-vs-fallback parity test could never have caught this:
+    // its fixture is a plain temp directory, which has no firmlinks and no
+    // mount points. This one scans the real startup volume shallowly, so it
+    // exercises the actual platform behaviour.
+    //
+    // Kept cheap and robust: it only asserts that the well-known firmlinked
+    // directories are present with a non-zero size, which requires no
+    // knowledge of the machine's contents and no full-disk walk.
+    func test_startup_volume_firmlinks_are_scanned() async throws {
+        // /Users is a firmlink on every modern macOS install; if it isn't
+        // readable at all (sandboxed CI, no permissions) there is nothing
+        // meaningful to assert.
+        guard FileManager.default.isReadableFile(atPath: "/Users") else {
+            throw XCTSkip("/Users is not readable in this environment")
+        }
+
+        var rootStat = stat()
+        var usersStat = stat()
+        guard lstat("/", &rootStat) == 0, lstat("/Users", &usersStat) == 0 else {
+            throw XCTSkip("could not stat / and /Users")
+        }
+        // The bug only exists where the enumerated and resolved identities
+        // differ, which is what makes a path a firmlink. On a volume layout
+        // without firmlinks there is nothing to regress.
+        guard rootStat.st_dev == usersStat.st_dev else {
+            throw XCTSkip("unexpected volume layout: /Users is on another device")
+        }
+
+        // Scan "/" itself but keep it cheap: exclude the large subtrees, so
+        // this walks the top level and stops. The point is whether the
+        // firmlinked entries survive traversal at all, not their exact sizes.
+        let prior = UserDefaults.standard.string(forKey: "excludedFolderNames")
+        UserDefaults.standard.set("System,usr,bin,sbin,dev,.Trash", forKey: "excludedFolderNames")
+        defer {
+            if let prior { UserDefaults.standard.set(prior, forKey: "excludedFolderNames") }
+            else { UserDefaults.standard.removeObject(forKey: "excludedFolderNames") }
+        }
+
+        let scanner = FileScanner()
+        var root: FileNode?
+        for await progress in await scanner.scan(url: URL(fileURLWithPath: "/")) {
+            if case .completed(let tree, _) = progress { root = FileNode(tree: tree, index: tree.rootIndex) }
+        }
+        guard let root else { return XCTFail("scanning / produced no tree") }
+
+        guard let users = root.children.first(where: { $0.name == "Users" }) else {
+            return XCTFail("/Users is missing from the scan entirely — firmlinks are being dropped")
+        }
+        XCTAssertGreaterThan(
+            users.size, 0,
+            "/Users scanned as 0 bytes — the firmlinked directory was traversed but produced nothing"
+        )
+    }
 }

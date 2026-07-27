@@ -147,12 +147,11 @@ private struct DirWorkItem {
     let path: String
     let url: URL
     let node: FSNode
-    // Identity recorded at discovery time (nil only for the scan root, which
-    // was just lstat'd immediately before being opened). Re-checked via fstat
-    // right after opening the directory, so a directory replaced in-between
-    // (TOCTOU) is detected and skipped rather than silently scanned wrong.
-    let expectedDev: UInt64?
-    let expectedIno: UInt64?
+    // The scan root is exempt from the mount-boundary and dedup checks that
+    // every other directory goes through: it defines the volume the scan is
+    // bound to, and it is registered in the visited set before traversal
+    // starts, so re-checking it here would skip the whole scan.
+    let isScanRoot: Bool
     // Root is depth 0; each child work item is its parent's depth + 1. Used
     // by the auto-summarization depth gate (see AtomicDirectorySummary.swift).
     let depth: Int
@@ -240,7 +239,7 @@ private func _buildTree(
     _ = visited.visit(dev: rootDevKey, ino: rootInoKey)
 
     let rootNode = FSNode(url: rootURL, name: name, isDirectory: true, size: 0, fileExtension: "", parent: nil)
-    let seed = DirWorkItem(path: rootPath, url: rootURL, node: rootNode, expectedDev: rootDevKey, expectedIno: rootInoKey, depth: 0)
+    let seed = DirWorkItem(path: rootPath, url: rootURL, node: rootNode, isScanRoot: true, depth: 0)
     let queue = WorkQueue(seed: seed)
 
     let workerCount = min(max(2, ProcessInfo.processInfo.activeProcessorCount / 2), 8)
@@ -303,15 +302,36 @@ private func _processDirectory(
     }
     defer { close(fd) }
 
-    if let expectedDev = item.expectedDev, let expectedIno = item.expectedIno {
-        var st = stat()
-        guard fstat(fd, &st) == 0,
-              UInt64(bitPattern: Int64(st.st_dev)) == expectedDev,
-              UInt64(st.st_ino) == expectedIno else {
-            // The directory at this path was replaced between discovery and
-            // open (TOCTOU race); drop it silently rather than scan the wrong thing.
-            return
-        }
+    // Everything identity-related is decided from the OPENED directory, never
+    // from the parent listing's record for it.
+    //
+    // macOS firmlinks are why. `/Users`, `/Applications`, `/Library`, `/opt`,
+    // `/private`, `/Volumes`, `/cores` and friends are firmlinks: the sealed
+    // system volume holds a link record with its own inode, which resolves on
+    // open to a completely different inode on the Data volume. An earlier
+    // version compared the enumerated (dev, ino) against the opened one and
+    // dropped the directory when they disagreed, as a TOCTOU guard — which
+    // silently discarded every firmlink, i.e. essentially all user data. A
+    // scan of "/" reported 11.8 GB instead of 479.3 GB.
+    //
+    // Reading identity after the open is also strictly more accurate for the
+    // other two rules: `/dev` enumerates with the root's device but is really
+    // devfs, and firmlink aliases (`/Users` vs `/System/Volumes/Data/Users`)
+    // only collide once resolved, which is exactly what makes the dedup work.
+    var opened = stat()
+    guard fstat(fd, &opened) == 0, opened.st_mode & S_IFMT == S_IFDIR else {
+        counter.add(items: 1, bytes: 0)
+        return
+    }
+    let openedDev = UInt64(bitPattern: Int64(opened.st_dev))
+    let openedIno = UInt64(opened.st_ino)
+
+    if !item.isScanRoot {
+        // Mount boundary: stay on the volume the scan started from.
+        guard openedDev == rootDevKey else { return }
+        // Firmlink/alias dedup on the resolved target, so the same directory
+        // reached by two paths is only counted once.
+        guard visited.visit(dev: openedDev, ino: openedIno) else { return }
     }
 
     let entries: [BulkDirEntry]
@@ -360,17 +380,15 @@ private func _processDirectory(
             continue
 
         case .directory:
-            // Mount point: skip directories on a different device than the scan root.
-            if entry.dev != rootDevKey { continue }
-            // Dedup by (dev, ino): protects against firmlink aliases like
-            // /Applications vs /System/Volumes/Data/Applications.
-            guard visited.visit(dev: entry.dev, ino: entry.ino) else { continue }
-
+            // No device/dedup filtering here: a directory entry's enumerated
+            // (dev, ino) describes the link record, which for a firmlink is
+            // not the thing that gets opened. Both checks happen in the child's
+            // own `_processDirectory`, against its resolved identity.
             let childURL = item.url.appendingPathComponent(entry.name, isDirectory: true)
             let childNode = FSNode(url: childURL, name: entry.name, isDirectory: true, size: 0, fileExtension: "", parent: item.node)
             children.append(childNode)
             let childPath = item.path.hasSuffix("/") ? item.path + entry.name : item.path + "/" + entry.name
-            queue.push(DirWorkItem(path: childPath, url: childURL, node: childNode, expectedDev: entry.dev, expectedIno: entry.ino, depth: item.depth + 1))
+            queue.push(DirWorkItem(path: childPath, url: childURL, node: childNode, isScanRoot: false, depth: item.depth + 1))
 
         case .file:
             let childURL = item.url.appendingPathComponent(entry.name, isDirectory: false)
