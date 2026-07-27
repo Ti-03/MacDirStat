@@ -34,6 +34,17 @@ public final class FileTree: @unchecked Sendable {
         rootIndex: Int,
         rootPath: String
     ) {
+        // Every per-node array must be the same length, or a later pass that
+        // walks all records will read past the end of one of them. A missing
+        // span entry for an appended node is exactly how the app once crashed
+        // on the main thread during a live refresh, so fail loudly here in
+        // debug rather than far away at the eventual read. Untrusted archives
+        // are length-checked separately by `ScanArchive.validate()` before
+        // ever reaching this initializer.
+        assert(parentIndex.count == records.count, "parentIndex must have one entry per record")
+        assert(childStart.count == records.count, "childStart must have one entry per record")
+        assert(childCount.count == records.count, "childCount must have one entry per record")
+
         self.records = records
         self.parentIndex = parentIndex
         self.childStart = childStart
@@ -121,6 +132,13 @@ public final class FileTree: @unchecked Sendable {
         for i in 0..<newChildStart.count where i != rootIndex && newChildStart[i] >= rootChildrenEnd {
             newChildStart[i] += 1
         }
+        // The synthetic node needs its own (empty) span, like every other
+        // record. Omitting it left childStart/childCount one shorter than
+        // records, and any later pass that walks all records and reads their
+        // spans — `replacingSubtree` during a live refresh, for one — ran off
+        // the end and trapped on "Index out of range".
+        newChildStart.append(newChildIndices.count)
+        newChildCount.append(0)
 
         return FileTree(
             records: newRecords,

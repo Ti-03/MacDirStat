@@ -211,4 +211,58 @@ final class FileTreeTests: XCTestCase {
         XCTAssertEqual(subNode.children.map(\.name), ["a.txt", "b.txt"], "unrelated subtree's children/order must survive the splice")
         XCTAssertEqual(subNode.url.path, "/scan/sub")
     }
+
+    // The synthetic node used to be appended to `records` and `parentIndex`
+    // without a matching entry in `childStart`/`childCount`, leaving the tree
+    // one span short of its own record count. Nothing noticed until some later
+    // pass iterated every record and read its span — which crashed the app
+    // with "Index out of range" (see the splice test below). Every per-node
+    // array must stay the same length.
+    func test_appending_synthetic_root_child_keeps_all_per_node_arrays_in_step() {
+        let (root, _, _, _, _) = makeFixture()
+        let tree = FileTreeBuilder.build(from: root, rootPath: "/scan")
+        let newTree = tree.appendingSyntheticRootChild(name: "Hidden & Unreadable Space", size: 450)
+
+        let count = newTree.records.count
+        XCTAssertEqual(newTree.parentIndex.count, count, "parentIndex must have one entry per record")
+        XCTAssertEqual(newTree.childStart.count, count, "childStart must have one entry per record")
+        XCTAssertEqual(newTree.childCount.count, count, "childCount must have one entry per record")
+
+        // Reading every node's span must be in range and internally sane.
+        for i in 0..<count {
+            let start = newTree.childStart[i]
+            let cnt = newTree.childCount[i]
+            XCTAssertTrue(start >= 0 && start + cnt <= newTree.childIndices.count, "span out of range for node \(i)")
+        }
+    }
+
+    // The crash a user actually hit: scan a volume root (which appends the
+    // synthetic "Hidden & Unreadable Space" child), then let a live
+    // filesystem change splice a subtree. `replacingSubtree` walks every
+    // record and reads its span, so the missing entry blew up on the main
+    // thread and killed the app.
+    func test_splicing_a_tree_that_has_a_synthetic_child_does_not_crash() {
+        let (root, _, _, _, _) = makeFixture()
+        let tree = FileTreeBuilder
+            .build(from: root, rootPath: "/scan")
+            .appendingSyntheticRootChild(name: "Hidden & Unreadable Space", size: 450)
+
+        let subIndex = (0..<tree.records.count).first { tree.records[$0].name == "sub" }!
+
+        let replacement = FSNode(url: URL(fileURLWithPath: "/scan/sub"), name: "sub", isDirectory: true, size: 120, fileExtension: "", parent: nil)
+        let onlyChild = FSNode(url: URL(fileURLWithPath: "/scan/sub/new.txt"), name: "new.txt", isDirectory: false, size: 120, fileExtension: "txt", parent: replacement)
+        replacement.children = [onlyChild]
+        let subtree = FileTreeBuilder.build(from: replacement, rootPath: "/scan/sub")
+
+        let spliced = tree.replacingSubtree(at: subIndex, with: subtree)
+
+        let newRoot = FileNode(tree: spliced, index: spliced.rootIndex)
+        XCTAssertTrue(
+            newRoot.children.contains { $0.isSynthetic },
+            "the synthetic hidden-space child must survive a splice elsewhere in the tree"
+        )
+        let newSub = newRoot.children.first { $0.name == "sub" }!
+        XCTAssertEqual(newSub.children.map(\.name), ["new.txt"])
+        XCTAssertEqual(newRoot.size, 500 + 120 + 450, "root size must reflect the spliced subtree plus the synthetic child")
+    }
 }
