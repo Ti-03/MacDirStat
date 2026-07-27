@@ -10,9 +10,14 @@ struct FullDiskAccessSheet: View {
     @EnvironmentObject private var vm: ScanViewModel
     @Environment(\.dismiss) private var dismiss
 
+    // Whether the access probe already claimed success at the moment this
+    // sheet opened. Captured once, so a grant can be told apart from a probe
+    // that was simply wrong to begin with.
+    @State private var accessWasMissingOnOpen: Bool?
+
     var body: some View {
         VStack(spacing: 22) {
-            if vm.hasFullDiskAccess {
+            if Self.showsGrantedState(accessWasMissingOnOpen: accessWasMissingOnOpen, hasAccessNow: vm.hasFullDiskAccess) {
                 grantedState
             } else {
                 missingState
@@ -20,6 +25,9 @@ struct FullDiskAccessSheet: View {
         }
         .padding(28)
         .frame(width: 460)
+        .onAppear {
+            if accessWasMissingOnOpen == nil { accessWasMissingOnOpen = !vm.hasFullDiskAccess }
+        }
         .task {
             // Poll for a live permission change while the sheet is on screen — macOS
             // has no notification for TCC grants, so this is the only way to react
@@ -30,6 +38,25 @@ struct FullDiskAccessSheet: View {
                 vm.recheckFullDiskAccess()
             }
         }
+    }
+
+    /// "Access granted!" is only honest for a grant this sheet actually watched
+    /// happen: the probe said no when the sheet opened, and says yes now.
+    ///
+    /// The probe (is the TCC database readable) is not a reliable proxy for
+    /// "this build can read the user's files". It can report success while the
+    /// scan is still being denied hundreds of folders — which is exactly when
+    /// the user opens this sheet from the warning banner. Keying off the
+    /// probe's current value alone put them in a dead end: a congratulations
+    /// screen whose only action is a relaunch that changes nothing, with no way
+    /// to reach the System Settings button they were promised.
+    ///
+    /// So when the probe already claims access on open, show the instructions
+    /// instead. Nothing is lost: if access really is fine, the banner that led
+    /// here would not be showing.
+    static func showsGrantedState(accessWasMissingOnOpen: Bool?, hasAccessNow: Bool) -> Bool {
+        guard let accessWasMissingOnOpen else { return false }
+        return accessWasMissingOnOpen && hasAccessNow
     }
 
     // MARK: - State A: access missing
@@ -84,7 +111,15 @@ struct FullDiskAccessSheet: View {
         let base = "macOS protects some folders (Documents, Desktop, other apps' data) until you grant Full Disk Access. MacDirStat reads sizes only — nothing is modified, collected, or sent anywhere."
         guard vm.deniedCount > 0 else { return base }
         let folders = vm.deniedCount == 1 ? "1 folder was" : "\(vm.deniedCount) folders were"
-        return "\(base) \(folders) blocked during your last scan."
+        var text = "\(base) \(folders) blocked during your last scan."
+        // The confusing case: the toggle looks on, but folders are still
+        // blocked. macOS ties the grant to the exact signed copy of the app,
+        // so a rebuilt, re-signed, or moved copy inherits nothing from the
+        // entry already in the list — it just sits there looking enabled.
+        if vm.hasFullDiskAccess {
+            text += " If MacDirStat already appears enabled in the list, remove it with the “−” button and add this copy again — macOS ties the grant to one exact copy of the app."
+        }
+        return text
     }
 
     private var steps: some View {

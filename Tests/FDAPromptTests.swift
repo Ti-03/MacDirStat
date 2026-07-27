@@ -45,4 +45,31 @@ final class FDAPromptTests: XCTestCase {
             )
         )
     }
+
+    // MARK: - "Access granted!" must reflect an observed grant, not a probe
+
+    // The dead end this guards against: the readability probe claims access
+    // while the scan is still being denied hundreds of folders, so opening the
+    // sheet from the warning banner landed on a congratulations screen whose
+    // only action was a relaunch that changed nothing — and the System
+    // Settings button was unreachable.
+    func test_granted_state_requires_access_to_have_flipped_while_sheet_open() {
+        // Probe already claimed access when the sheet opened: never celebrate.
+        XCTAssertFalse(
+            FullDiskAccessSheet.showsGrantedState(accessWasMissingOnOpen: false, hasAccessNow: true),
+            "a probe that was already true on open is not evidence of a grant"
+        )
+        // Access was missing and has now appeared: this is the real grant.
+        XCTAssertTrue(
+            FullDiskAccessSheet.showsGrantedState(accessWasMissingOnOpen: true, hasAccessNow: true)
+        )
+        // Still missing.
+        XCTAssertFalse(
+            FullDiskAccessSheet.showsGrantedState(accessWasMissingOnOpen: true, hasAccessNow: false)
+        )
+        // Before onAppear has recorded the starting state.
+        XCTAssertFalse(
+            FullDiskAccessSheet.showsGrantedState(accessWasMissingOnOpen: nil, hasAccessNow: true)
+        )
+    }
 }
