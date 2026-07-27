@@ -270,6 +270,68 @@ final class IncrementalRefreshTests: XCTestCase {
         return result
     }
 
+    // MARK: - A live refresh must never restart the whole scan
+    //
+    // Regression test for a user-visible glitch: the scan would finish, the
+    // treemap would start drawing, then everything vanished and scanning
+    // began again from zero, forever. Cause: any FSEvents change the splice
+    // refused escalated to a full `scan(url:)`, which clears `tree`/`cells`;
+    // completing that scan restarted watching, which delivered another
+    // refused change, and so on.
+    //
+    // The refused cases are reachable in ordinary use — this watcher reports
+    // directory granularity, so a change to the scanned root itself is
+    // routine, as is any change inside an auto-summarized folder.
+    @MainActor
+    func test_unspliceable_change_does_not_restart_the_scan() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try Data(repeating: 1, count: 4096).write(to: tmp.appendingPathComponent("a.bin"))
+
+        let vm = await scanAndWait(tmp)
+        guard let treeBefore = vm.tree else { return XCTFail("initial scan should populate a tree") }
+        XCTAssertFalse(vm.isScanning)
+
+        // The scanned root itself — the single most common FSEvents report,
+        // and one `splicedTree` always refuses.
+        await vm.handleFileSystemChanges([tmp.path])
+
+        XCTAssertFalse(vm.isScanning, "an unspliceable change must not kick off a full rescan")
+        XCTAssertNotNil(vm.tree, "the finished tree must survive an unspliceable change")
+        XCTAssertTrue(vm.tree === treeBefore, "the tree should be left untouched, not rebuilt")
+        XCTAssertTrue(vm.hasStaleResults, "the UI should be told results may be stale")
+    }
+
+    // The other refused case: a path inside an auto-summarized directory.
+    @MainActor
+    func test_change_inside_autosummarized_directory_does_not_restart_the_scan() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let nodeModules = tmp.appendingPathComponent("node_modules")
+        try FileManager.default.createDirectory(at: nodeModules, withIntermediateDirectories: true)
+        for i in 0..<5 {
+            try Data(repeating: 2, count: 64).write(to: nodeModules.appendingPathComponent("f\(i).js"))
+        }
+
+        let priorExcluded = UserDefaults.standard.string(forKey: "excludedFolderNames")
+        UserDefaults.standard.set(".git,DerivedData,.Trash", forKey: "excludedFolderNames")
+        defer {
+            if let priorExcluded { UserDefaults.standard.set(priorExcluded, forKey: "excludedFolderNames") }
+            else { UserDefaults.standard.removeObject(forKey: "excludedFolderNames") }
+        }
+
+        let vm = await scanAndWait(tmp)
+        guard let treeBefore = vm.tree else { return XCTFail("initial scan should populate a tree") }
+
+        await vm.handleFileSystemChanges([nodeModules.appendingPathComponent("f0.js").path])
+
+        XCTAssertFalse(vm.isScanning, "a change inside a summarized folder must not kick off a full rescan")
+        XCTAssertTrue(vm.tree === treeBefore, "the tree should be left untouched, not rebuilt")
+    }
+
     @MainActor
     private func scanAndWait(_ url: URL) async -> ScanViewModel {
         let prior = UserDefaults.standard.object(forKey: "realtimeMonitoring") as? Bool

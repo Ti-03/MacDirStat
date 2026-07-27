@@ -23,6 +23,11 @@ public final class ScanViewModel: ObservableObject {
     @Published public var duplicateGroups: [[FileNode]] = []
     @Published public var hasFullDiskAccess: Bool = true
     @Published public var isWatching: Bool = false
+    // Set when a live change arrived that the incremental splice could not
+    // fold in (see `handleFileSystemChanges`). The displayed tree is still
+    // valid, just possibly behind reality for that path — the UI offers a
+    // manual rescan rather than the app silently restarting the whole scan.
+    @Published public var hasStaleResults: Bool = false
     @Published public var deniedCount: Int = 0
     @Published public var showFDASheet: Bool = false
     // Set when `tree` was loaded from a `.mdscan` archive instead of a live
@@ -163,6 +168,7 @@ public final class ScanViewModel: ObservableObject {
         watchTask?.cancel()
         fileWatcher.stop()
         isWatching = false
+        hasStaleResults = false
         layoutGeneration += 1       // invalidate any in-progress layout
         scanURL = url
         UserDefaults.standard.set(url.path, forKey: "lastScannedPath")
@@ -315,10 +321,21 @@ public final class ScanViewModel: ObservableObject {
     // multi-directory splice, at the cost of a little redundant rescanning
     // when a batch contains both a directory and one of its own descendants.
     //
-    // Falls back to a full rescan (unchanged from before) only for the cases
-    // a splice can't safely handle — see `splicedTree`'s doc comment: the
-    // root itself changed/vanished, a changed path no longer resolves
-    // anywhere in the tree, or it resolves into an auto-summarized node.
+    // A background refresh must NEVER destroy a finished scan. An earlier
+    // version fell back to `scan(url:)` — a full rescan — for any change a
+    // splice couldn't handle, which produced an infinite restart loop on real
+    // folders: the scan finishes, watching starts, FSEvents immediately
+    // reports a change the splice refuses (most commonly the scanned root
+    // directory itself, since this watcher is directory-granularity, or
+    // anything inside an auto-summarized folder like node_modules), the full
+    // rescan clears `tree`/`cells` so the treemap vanishes mid-render, and on
+    // completion it starts watching again and repeats forever.
+    //
+    // So unspliceable changes are now SKIPPED, never escalated: the rest of
+    // the batch still splices, and `hasStaleResults` records that some change
+    // could not be folded in, so the UI can offer a manual rescan instead of
+    // silently thrashing. A vanished root just stops watching.
+    //
     // Not `private`: exercised directly by IncrementalRefreshTests (via
     // `@testable import`) to simulate an FSEvents batch deterministically,
     // without needing a real FSEventStream round trip.
@@ -326,26 +343,33 @@ public final class ScanViewModel: ObservableObject {
         guard let scanURL, let startingTree = tree, !isReadOnlySnapshot else { return }
 
         guard FileManager.default.fileExists(atPath: scanURL.path) else {
-            // The scanned root itself is gone (deleted/renamed/unmounted) —
-            // no subtree splice can recover from that.
+            // The scanned root itself is gone (deleted/renamed/unmounted).
+            // Nothing to refresh into, and re-scanning a missing path would
+            // just fail on a loop — stop watching and let the user decide.
             if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
-                FileHandle.standardError.write("REFRESH fallback-full-rescan root-vanished root=\(scanURL.path)\n".data(using: .utf8)!)
+                FileHandle.standardError.write("REFRESH stop-watching root-vanished root=\(scanURL.path)\n".data(using: .utf8)!)
             }
-            scan(url: scanURL)
+            watchTask?.cancel()
+            fileWatcher.stop()
+            isWatching = false
+            hasStaleResults = true
             return
         }
 
         var workingTree = startingTree
+        var skippedUnspliceable = false
         for changedPath in paths {
             guard let spliced = Self.splicedTree(afterChangeAt: changedPath, in: workingTree) else {
                 if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
-                    FileHandle.standardError.write("REFRESH fallback-full-rescan path=\(changedPath)\n".data(using: .utf8)!)
+                    FileHandle.standardError.write("REFRESH skipped-unspliceable path=\(changedPath)\n".data(using: .utf8)!)
                 }
-                scan(url: scanURL)
-                return
+                skippedUnspliceable = true
+                continue
             }
             workingTree = spliced
         }
+
+        if skippedUnspliceable { hasStaleResults = true }
 
         guard workingTree !== startingTree else { return } // nothing actually spliceable in this batch
 

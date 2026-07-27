@@ -102,7 +102,15 @@ struct TreemapView: View {
             }
 
             // ── Live indicator ───────────────────────────────────────────────
-            if vm.isWatching {
+            // When a change arrived that couldn't be folded in incrementally,
+            // say so and offer a rescan instead of restarting the scan on the
+            // user's behalf (which used to loop forever).
+            if vm.hasStaleResults {
+                StaleBadge { if let url = vm.scanURL { vm.scan(url: url) } }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .transition(.opacity.animation(.easeInOut(duration: 0.3)))
+            } else if vm.isWatching {
                 LiveBadge()
                     .padding(10)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
@@ -366,6 +374,31 @@ private struct HoverTooltip: View {
 }
 
 // MARK: - Live badge
+
+// Shown instead of the Live badge once a filesystem change arrived that the
+// incremental splice refused (a change to the scanned root itself, or inside
+// an auto-summarized folder). The results on screen are still correct for
+// everything else, so this offers a rescan rather than forcing one.
+private struct StaleBadge: View {
+    let rescan: () -> Void
+
+    var body: some View {
+        Button(action: rescan) {
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 9, weight: .semibold))
+                Text("Rescan")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .glassCapsule()
+        }
+        .buttonStyle(.plain)
+        .help("Some changes on disk couldn't be updated in place. Click to rescan.")
+    }
+}
 
 private struct LiveBadge: View {
     @State private var pulse = false
