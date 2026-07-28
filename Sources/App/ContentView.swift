@@ -95,7 +95,10 @@ struct ContentView: View {
                 }
                 .help("Settings & About")
                 .popover(isPresented: $showingSettings, arrowEdge: .bottom) {
-                    DashboardSettingsView()
+                    // Passed explicitly rather than relying on the popover
+                    // inheriting it, so the Permissions section can't crash
+                    // looking for a missing environment object.
+                    DashboardSettingsView().environmentObject(vm)
                 }
             }
         }
@@ -470,6 +473,7 @@ private struct SnapshotBanner: View {
 // MARK: - Dashboard settings popover
 
 private struct DashboardSettingsView: View {
+    @EnvironmentObject private var vm: ScanViewModel
     @AppStorage("hapticFeedbackEnabled") private var hapticEnabled = true
     @AppStorage("useBinarySize")         private var useBinarySize = false
     @AppStorage("showHiddenFiles")       private var showHiddenFiles = false
@@ -550,6 +554,34 @@ private struct DashboardSettingsView: View {
 
                 Divider()
 
+                settingsSection("Permissions") {
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(vm.hasFullDiskAccess ? Color.green : Color.orange)
+                            .frame(width: 7, height: 7)
+                        Text(vm.hasFullDiskAccess ? "Full Disk Access looks granted" : "Full Disk Access not granted")
+                            .font(.system(size: 12))
+                    }
+
+                    // The grant is per exact copy of the app, so the surest
+                    // route is dragging this bundle in rather than hunting for
+                    // it with the "+" picker and possibly adding another build.
+                    FullDiskAccessDragTile()
+
+                    Button("Open Full Disk Access settings") {
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
+                    }
+                    .controlSize(.small)
+
+                    if vm.hasFullDiskAccess && vm.deniedCount > 0 {
+                        caption("\(vm.deniedCount) folders were still unreadable in the last scan. If DirStat is already listed, remove it with “−” and drag this copy in again — macOS ties the grant to one exact copy.")
+                    } else {
+                        caption("Without it, protected folders scan as 0 bytes and land in “Hidden & Unreadable Space”.")
+                    }
+                }
+
+                Divider()
+
                 settingsSection("Trackpad") {
                     Toggle("Haptic feedback", isOn: $hapticEnabled)
                         .toggleStyle(.switch).controlSize(.small)
@@ -578,6 +610,17 @@ private struct DashboardSettingsView: View {
             }
         }
         .frame(width: 300, height: 520)
+        // The grant can change while this popover is open (the user drags the
+        // icon into System Settings and comes straight back), and macOS has no
+        // notification for it, so re-probe on appear and then periodically.
+        .onAppear { vm.recheckFullDiskAccess() }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1.5))
+                guard !Task.isCancelled else { break }
+                vm.recheckFullDiskAccess()
+            }
+        }
     }
 
     @ViewBuilder

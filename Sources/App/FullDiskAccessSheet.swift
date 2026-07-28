@@ -147,54 +147,7 @@ struct FullDiskAccessSheet: View {
         .glassCard(cornerRadius: 14)
     }
 
-    /// The app's own icon, draggable straight into the Full Disk Access list.
-    ///
-    /// Better than the "+" button for a reason that bit a real user: macOS
-    /// grants access to one exact copy of an app, and the file picker happily
-    /// adds a different copy (an older build in /Applications, say) which then
-    /// sits in the list looking enabled while the copy actually running gets
-    /// nothing. Dragging carries this bundle's own URL, so the entry that
-    /// lands in the list is unambiguously the app the user is looking at.
-    private var dragTile: some View {
-        HStack(spacing: 12) {
-            Image(nsImage: Self.runningAppIcon())
-                .resizable()
-                .frame(width: 52, height: 52)
-                .offset(y: bobbing ? -3 : 3)
-                .animation(
-                    reduceMotion ? nil : .easeInOut(duration: 1.1).repeatForever(autoreverses: true),
-                    value: bobbing
-                )
-                .onDrag {
-                    // The payload is this bundle's URL, so System Settings
-                    // registers precisely the running copy.
-                    NSItemProvider(object: Self.runningAppURL() as NSURL)
-                }
-                .help("Drag me into the Full Disk Access list")
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(Self.runningAppName())
-                    .font(.system(size: 12.5, weight: .semibold))
-                Text("Drag me into the list")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 0)
-
-            Image(systemName: "arrow.right")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.tertiary)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
-                .foregroundStyle(.tint.opacity(0.55))
-        )
-        .onAppear { bobbing = true }
-    }
+    private var dragTile: some View { FullDiskAccessDragTile() }
 
     /// URL of the bundle that is actually running — the thing that needs the
     /// grant. Kept in one place so the drag payload and the Finder fallback
@@ -258,5 +211,63 @@ struct FullDiskAccessSheet: View {
                     .frame(maxWidth: .infinity)
             }
         }
+    }
+}
+
+/// The running app's own icon, draggable straight into the Full Disk Access
+/// list in System Settings.
+///
+/// Better than the "+" button for a reason that bit a real user: macOS grants
+/// access to one exact copy of an app, and the file picker happily adds a
+/// different copy (an older build in /Applications, say) which then sits in
+/// the list looking enabled while the copy actually running gets nothing.
+/// Dragging carries this bundle's own URL, so the entry that lands in the list
+/// is unambiguously the app the user is looking at.
+///
+/// Shared by the guided sheet and the Permissions section of Settings, so the
+/// two can never drift apart about which copy they hand over.
+struct FullDiskAccessDragTile: View {
+    @State private var bobbing = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(nsImage: FullDiskAccessSheet.runningAppIcon())
+                .resizable()
+                .frame(width: 46, height: 46)
+                .offset(y: bobbing ? -3 : 3)
+                .animation(
+                    reduceMotion ? nil : .easeInOut(duration: 1.1).repeatForever(autoreverses: true),
+                    value: bobbing
+                )
+                .onDrag {
+                    // The payload is this bundle's URL, so System Settings
+                    // registers precisely the running copy.
+                    NSItemProvider(object: FullDiskAccessSheet.runningAppURL() as NSURL)
+                }
+                .help("Drag me into the Full Disk Access list")
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(FullDiskAccessSheet.runningAppName())
+                    .font(.system(size: 12.5, weight: .semibold))
+                Text("Drag me into the list")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+
+            Image(systemName: "arrow.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                .foregroundStyle(.tint.opacity(0.55))
+        )
+        .onAppear { bobbing = true }
     }
 }
