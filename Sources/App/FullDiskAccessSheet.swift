@@ -14,6 +14,9 @@ struct FullDiskAccessSheet: View {
     // sheet opened. Captured once, so a grant can be told apart from a probe
     // that was simply wrong to begin with.
     @State private var accessWasMissingOnOpen: Bool?
+    // Drives the gentle up/down hint on the draggable icon.
+    @State private var bobbing = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 22) {
@@ -96,6 +99,16 @@ struct FullDiskAccessSheet: View {
                     .controlSize(.large)
                     .frame(maxWidth: .infinity)
 
+                // Fallback for anyone who would rather drag from a Finder
+                // window, and a way to see exactly which copy is running when
+                // several builds are floating around.
+                Button("Show this app in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([Self.runningAppURL()])
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+
                 Button("Don't ask again") {
                     UserDefaults.standard.set(true, forKey: "fdaPromptSuppressed")
                     dismiss()
@@ -123,14 +136,77 @@ struct FullDiskAccessSheet: View {
     }
 
     private var steps: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             stepRow(1, "Open System Settings")
-            stepRow(2, "Find MacDirStat in the list and switch it on")
-            stepRow(3, "Come back here — we'll take it from there")
+            stepRow(2, "Drag this icon into the list")
+            dragTile
+            stepRow(3, "Make sure its switch is on, then come back")
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassCard(cornerRadius: 14)
+    }
+
+    /// The app's own icon, draggable straight into the Full Disk Access list.
+    ///
+    /// Better than the "+" button for a reason that bit a real user: macOS
+    /// grants access to one exact copy of an app, and the file picker happily
+    /// adds a different copy (an older build in /Applications, say) which then
+    /// sits in the list looking enabled while the copy actually running gets
+    /// nothing. Dragging carries this bundle's own URL, so the entry that
+    /// lands in the list is unambiguously the app the user is looking at.
+    private var dragTile: some View {
+        HStack(spacing: 12) {
+            Image(nsImage: Self.runningAppIcon())
+                .resizable()
+                .frame(width: 52, height: 52)
+                .offset(y: bobbing ? -3 : 3)
+                .animation(
+                    reduceMotion ? nil : .easeInOut(duration: 1.1).repeatForever(autoreverses: true),
+                    value: bobbing
+                )
+                .onDrag {
+                    // The payload is this bundle's URL, so System Settings
+                    // registers precisely the running copy.
+                    NSItemProvider(object: Self.runningAppURL() as NSURL)
+                }
+                .help("Drag me into the Full Disk Access list")
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(Self.runningAppName())
+                    .font(.system(size: 12.5, weight: .semibold))
+                Text("Drag me into the list")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+
+            Image(systemName: "arrow.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                .foregroundStyle(.tint.opacity(0.55))
+        )
+        .onAppear { bobbing = true }
+    }
+
+    /// URL of the bundle that is actually running — the thing that needs the
+    /// grant. Kept in one place so the drag payload and the Finder fallback
+    /// can never disagree about which copy they mean.
+    static func runningAppURL() -> URL { Bundle.main.bundleURL }
+
+    static func runningAppName() -> String {
+        Bundle.main.bundleURL.deletingPathExtension().lastPathComponent
+    }
+
+    static func runningAppIcon() -> NSImage {
+        NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
     }
 
     private func stepRow(_ number: Int, _ text: String) -> some View {

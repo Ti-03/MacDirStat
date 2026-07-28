@@ -72,4 +72,26 @@ final class FDAPromptTests: XCTestCase {
             FullDiskAccessSheet.showsGrantedState(accessWasMissingOnOpen: nil, hasAccessNow: true)
         )
     }
+
+    // MARK: - The draggable icon must point at the RUNNING copy
+
+    // macOS grants Full Disk Access to one exact copy of an app. The whole
+    // point of dragging the icon instead of using the "+" picker is that the
+    // payload cannot be some other build sitting in /Applications, so the
+    // dragged URL has to be this bundle and nothing else.
+    func test_drag_payload_is_the_running_bundle() {
+        XCTAssertEqual(
+            FullDiskAccessSheet.runningAppURL(),
+            Bundle.main.bundleURL,
+            "the drag must carry the running bundle, not a copy found elsewhere"
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: FullDiskAccessSheet.runningAppURL().path),
+            "the dragged URL must exist on disk or the drop silently does nothing"
+        )
+        XCTAssertFalse(
+            FullDiskAccessSheet.runningAppName().isEmpty,
+            "the tile needs a name to label the icon with"
+        )
+    }
 }
