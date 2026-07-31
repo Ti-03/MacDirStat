@@ -1,11 +1,11 @@
 # MacDirStat
 
-MacDirStat is a native macOS app that scans a folder and shows what is taking up
+MacDirStat is a native macOS app that scans a folder and shows what's taking up
 disk space, as an interactive radial treemap.
 
 This guide is for **macOS users who have MacDirStat installed** (or built it
 from source) and want to scan a folder, read the resulting chart, or look up
-what a specific API does. You do not need any Swift experience to follow the
+what a specific API does. You don't need any Swift experience to follow the
 tutorial or how-to guide; the reference section assumes you are reading the
 Swift source.
 

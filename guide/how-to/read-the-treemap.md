@@ -31,9 +31,9 @@ extension:
 | Pink    | Fonts                | `ttf`, `otf`, `woff`        |
 | Lime    | 3D / models          | `obj`, `fbx`, `gltf`        |
 
-An extension MacDirStat does not recognize gets a stable color derived from
+An extension MacDirStat doesn't recognize gets a stable color derived from
 its name, so the same unknown extension is always the same color across a
-scan. Folders are colored separately from files: each folder gets a muted,
+scan. Folders and files use different color schemes: each folder gets a muted,
 low-saturation tint based on its name, so folders never compete visually
 with the files inside them. Files also darken slightly with depth, so you
 can tell a top-level file from one buried five folders down at a glance.
@@ -55,7 +55,7 @@ can tell a top-level file from one buried five folders down at a glance.
 
 ## See also
 
-- [Scan your first folder](../tutorial/first-scan.md) if you have not run a
+- [Scan your first folder](../tutorial/first-scan.md) if you haven't run a
   scan yet.
 - [TreemapLayout reference](../reference/treemap-layout.md) for exactly how
   angles and colors are computed.

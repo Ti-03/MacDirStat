@@ -43,3 +43,27 @@ jobs:
 
       - name: Test
         run: swift test
+
+  # Prose gate: Vale lints the docs against the Microsoft style guide. A style
+  # violation fails the build, so it never reaches a reviewer. Runs on Linux
+  # (no Xcode needed) so it starts fast and in parallel with the build matrix.
+  prose-lint:
+    name: Docs prose (Vale)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Vale
+        run: |
+          VALE_VERSION=3.15.1
+          curl -sfL "https://github.com/errata-ai/vale/releases/download/v${VALE_VERSION}/vale_${VALE_VERSION}_Linux_64-bit.tar.gz" -o vale.tar.gz
+          tar -xzf vale.tar.gz vale
+          sudo install vale /usr/local/bin/vale
+          rm -f vale vale.tar.gz
+
+      # Downloads the Microsoft style package declared in .vale.ini.
+      - name: Sync Vale styles
+        run: vale sync
+
+      - name: Lint docs prose
+        run: vale guide docs/adr README.md

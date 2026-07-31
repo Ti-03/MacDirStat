@@ -36,6 +36,6 @@ proportional to how much disk space it uses.
 
 ## Next step
 
-The colors are not random. Continue to
+The colors aren't random. Continue to
 [How to read the treemap](../how-to/read-the-treemap.md) to learn what each
 color means and how to change the color scheme.

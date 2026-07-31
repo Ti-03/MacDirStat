@@ -60,8 +60,8 @@ alone type-checked. The runtime `#available` check stays inside the
 compile-time branch, so a build made with Xcode 26 still back-deploys
 correctly to macOS 14/15 at runtime.
 
-We also dropped `macos-14` from the CI matrix: its SDK predates both
-`glassEffect` and the `ContentUnavailableView` backport check, so it cannot
+I also dropped `macos-14` from the CI matrix: its SDK predates both
+`glassEffect` and the `ContentUnavailableView` backport check, so it can't
 build this project at all regardless of guards, and keeping it would only
 produce a permanently red, unfixable job.
 
@@ -72,9 +72,9 @@ produce a permanently red, unfixable job.
   `#available` alone. A future contributor who copies an existing
   `#available`-only pattern from elsewhere in SwiftUI code will reintroduce
   this bug; there is no compiler warning for it.
-- The CI matrix (`macos-15`, `macos-26`) is now load-bearing: it is the
+- The CI matrix (`macos-15`, `macos-26`) is now load-bearing: it's the
   only thing that would have caught this before it shipped, since a
-  single-SDK local build cannot reproduce the failure.
+  single-SDK local build can't reproduce the failure.
 - Slightly more boilerplate per call site (two nested conditionals instead
   of one), in exchange for the app actually compiling on the SDK most
   users' Macs currently have.
