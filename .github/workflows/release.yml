@@ -12,19 +12,135 @@ permissions:
   contents: write
   id-token: write
 
+# Ships the actual macOS app, Developer ID signed and notarized, as a DMG.
+#
+# This used to package `swift build -c release` output instead: a bare SwiftPM
+# executable, unsigned and un-notarized, which is not something anyone can
+# install by double-clicking. That is what v1.2.0 shipped (a 560 KB zip) and
+# what issue #22 reported.
+#
+# A DMG rather than a zip is deliberate. The app embeds Sparkle.framework,
+# which contains symlinks, and messaging apps, webmail and third-party
+# unarchivers routinely flatten symlinks out of a zip. That breaks the
+# framework, invalidates the signature, and makes macOS report the app as
+# "damaged". A disk image carries the bundle byte for byte.
+#
+# Required repository secrets:
+#   MACOS_CERTIFICATE          Developer ID Application cert, .p12, base64 encoded
+#   MACOS_CERTIFICATE_PWD      password for that .p12
+#   MACOS_SIGNING_IDENTITY     e.g. "Developer ID Application: Name (TEAMID)"
+#   KEYCHAIN_PASSWORD          any throwaway string for the temporary keychain
+#   NOTARY_APPLE_ID            Apple ID used for notarization
+#   NOTARY_TEAM_ID             Apple Developer team ID
+#   NOTARY_PASSWORD            app-specific password for that Apple ID
 jobs:
   build-sign-release:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Build release binary
-        run: swift build -c release
+      - name: Run tests before shipping anything
+        run: swift test
 
-      - name: Package artifact
+      # The signing identity has to live in a keychain the build can see. A
+      # dedicated, throwaway keychain keeps it out of the default one and
+      # disappears with the runner.
+      - name: Import Developer ID certificate
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
-          BIN=$(swift build -c release --show-bin-path)
-          ditto -c -k --keepParent "$BIN/MacDirStat" "MacDirStat-${GITHUB_REF_NAME}.zip"
+          set -euo pipefail
+          echo "$MACOS_CERTIFICATE" | base64 --decode > /tmp/cert.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -lut 3600 build.keychain
+          security import /tmp/cert.p12 -k build.keychain \
+            -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          rm -f /tmp/cert.p12
+
+      - name: Archive the app
+        run: |
+          set -euo pipefail
+          xcodebuild -project MacDirStat.xcodeproj \
+            -scheme MacDirStat \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            -archivePath "$RUNNER_TEMP/DirStat.xcarchive" \
+            archive
+
+      - name: Export with Developer ID
+        env:
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/export.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>developer-id</string>
+              <key>teamID</key>
+              <string>${NOTARY_TEAM_ID}</string>
+              <key>signingStyle</key>
+              <string>automatic</string>
+          </dict>
+          </plist>
+          EOF
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/DirStat.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/export.plist" \
+            -exportPath "$RUNNER_TEMP/export"
+
+      # The Applications symlink is what makes the familiar "drag me across"
+      # install window work.
+      - name: Build the DMG
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p "$RUNNER_TEMP/dmgroot"
+          ditto "$RUNNER_TEMP/export/DirStat.app" "$RUNNER_TEMP/dmgroot/DirStat.app"
+          ln -sf /Applications "$RUNNER_TEMP/dmgroot/Applications"
+          hdiutil create -volname "DirStat $VERSION" \
+            -srcfolder "$RUNNER_TEMP/dmgroot" \
+            -ov -format UDZO "DirStat-${VERSION}.dmg"
+          codesign --sign "$MACOS_SIGNING_IDENTITY" --timestamp "DirStat-${VERSION}.dmg"
+
+      - name: Notarize and staple
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          xcrun notarytool submit "DirStat-${VERSION}.dmg" \
+            --apple-id "$NOTARY_APPLE_ID" \
+            --team-id "$NOTARY_TEAM_ID" \
+            --password "$NOTARY_PASSWORD" \
+            --wait
+          xcrun stapler staple "DirStat-${VERSION}.dmg"
+
+      # Proves the artifact is installable before it is published: a stapled
+      # ticket Gatekeeper accepts, and an app inside the image whose signature
+      # survives with its symlinks intact.
+      - name: Verify the DMG the way a user receives it
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          xcrun stapler validate "DirStat-${VERSION}.dmg"
+          spctl -a -vvv -t open --context context:primary-signature "DirStat-${VERSION}.dmg"
+          hdiutil attach "DirStat-${VERSION}.dmg" -nobrowse -mountpoint /tmp/dmgcheck
+          codesign --verify --deep --strict --verbose=2 /tmp/dmgcheck/DirStat.app
+          spctl -a -vvv -t exec /tmp/dmgcheck/DirStat.app
+          hdiutil detach /tmp/dmgcheck
 
       - name: Install cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
@@ -34,18 +150,26 @@ jobs:
       # Rekor transparency log. --yes acknowledges that upload. cosign v3
       # writes signature + certificate + tlog proof as one .bundle file
       # (the old --output-signature/--output-certificate flags are gone).
-      - name: Sign artifact (Sigstore keyless)
+      - name: Sign the DMG (Sigstore keyless)
         run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
           cosign sign-blob --yes \
-            --bundle "MacDirStat-${GITHUB_REF_NAME}.zip.cosign.bundle" \
-            "MacDirStat-${GITHUB_REF_NAME}.zip"
+            --bundle "DirStat-${VERSION}.dmg.cosign.bundle" \
+            "DirStat-${VERSION}.dmg"
 
-      - name: Create GitHub release with signed artifact
+      - name: Create GitHub release with the signed DMG
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
           gh release create "$GITHUB_REF_NAME" \
             --title "MacDirStat $GITHUB_REF_NAME" \
             --generate-notes \
-            "MacDirStat-${GITHUB_REF_NAME}.zip" \
-            "MacDirStat-${GITHUB_REF_NAME}.zip.cosign.bundle"
+            "DirStat-${VERSION}.dmg" \
+            "DirStat-${VERSION}.dmg.cosign.bundle"
+
+      - name: Remove the temporary keychain
+        if: always()
+        run: security delete-keychain build.keychain || true
