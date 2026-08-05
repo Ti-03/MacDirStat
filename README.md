@@ -37,11 +37,11 @@ MacDirStat scans any folder and turns your filesystem into an interactive sunbur
 - **File type breakdown** — top file types with a searchable list of all types
 - **Move to Trash** — right-click any arc or row to trash it, chart refreshes instantly
 - **CSV export** — dump the full scan as a spreadsheet
-- **Save and reopen scans** — write a completed scan to an `.mdscan` file and reopen it later as a read-only snapshot (no delete actions, no live watching)
-- **Compare two scans** — diff the current scan against a saved one: added, removed, grown, and shrunk items, with a whole added or removed folder collapsing into one row (File > Compare With Saved Scan)
-- **Auto-summarization** — dependency and cache folders (node_modules and the like) collapse into a single row with their total size and file count, instead of a node per file
-- **Full Disk Access, made unambiguous** — drag the app's own icon straight into the permission list, since macOS grants access to one exact copy and a file picker makes it easy to add the wrong one
-- **Settings** — appearance (units, color scheme, default tab), file scanning (hidden files, excluded folders), behaviour (auto-scan on launch, real-time monitoring), a Permissions section with live Full Disk Access status, and haptic feedback
+- **Save and reopen scans**: write a completed scan to an `.mdscan` file and reopen it later as a read-only snapshot (no delete actions, no live watching)
+- **Compare two scans**: diff the current scan against a saved one: added, removed, grown, and shrunk items, with a whole added or removed folder collapsing into one row (File > Compare With Saved Scan)
+- **Auto-summarization**: dependency and cache folders (node_modules and the like) collapse into a single row with their total size and file count, instead of a node per file
+- **Full Disk Access, made unambiguous**: drag the app's own icon straight into the permission list, since macOS grants access to one exact copy and a file picker makes it easy to add the wrong one
+- **Settings**: appearance (units, color scheme, default tab), file scanning (hidden files, excluded folders), behaviour (auto-scan on launch, real-time monitoring), a Permissions section with live Full Disk Access status, and haptic feedback
 
 ## Screenshots
 
@@ -88,12 +88,12 @@ log.
 
 ## Tech
 
-Pure Swift + SwiftUI — no Electron, no web views; Sparkle for auto-updates is the only dependency.
+Pure Swift + SwiftUI. No Electron, no web views; Sparkle for auto-updates is the only dependency.
 
 | Layer | What |
 |---|---|
-| Scanner | `getattrlistbulk(2)` batch enumeration (name + metadata per syscall), with a `readdir` fallback and a bounded worker pool draining an iterative work queue — parallel, cancellable |
-| Store | Flat struct-of-arrays `FileTree` — contiguous records, no per-node heap object, paths reconstructed on demand |
+| Scanner | `getattrlistbulk(2)` batch enumeration (name + metadata per syscall), with a `readdir` fallback and a bounded worker pool draining an iterative work queue, parallel and cancellable |
+| Store | Flat struct-of-arrays `FileTree`: contiguous records, no per-node heap object, paths reconstructed on demand |
 | Auto-summarization | Dependency/cache folders (`node_modules` and similar) collapse into one summary node with a deep size and file count, instead of a node per file |
 | Layout | Custom sunburst partition algorithm (band-width from view size) |
 | Renderer | SwiftUI `Canvas` — draws 1,000+ arcs at 30 fps |
