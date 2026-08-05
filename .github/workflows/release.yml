@@ -42,10 +42,30 @@ jobs:
       - name: Run tests before shipping anything
         run: swift test
 
+      # Signing and notarization need credentials that intentionally may not
+      # be present: the Developer ID private key is kept on the maintainer's
+      # machine rather than uploaded here, and releases are then built and
+      # published by hand. Without this probe a tag would start the job and
+      # fail partway, which is the failure mode that produced the unusable
+      # v1.2.0 asset. When the secrets are absent the job runs the tests and
+      # stops cleanly instead.
+      - name: Can this runner sign?
+        id: caps
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+        run: |
+          if [ -n "$MACOS_CERTIFICATE" ]; then
+            echo "can_sign=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "can_sign=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No signing secrets configured. Tests ran; publish the notarized DMG manually. See the secret list at the top of this workflow to automate it."
+          fi
+
       # The signing identity has to live in a keychain the build can see. A
       # dedicated, throwaway keychain keeps it out of the default one and
       # disappears with the runner.
       - name: Import Developer ID certificate
+        if: steps.caps.outputs.can_sign == 'true'
         env:
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
@@ -64,6 +84,7 @@ jobs:
           rm -f /tmp/cert.p12
 
       - name: Archive the app
+        if: steps.caps.outputs.can_sign == 'true'
         run: |
           set -euo pipefail
           xcodebuild -project MacDirStat.xcodeproj \
@@ -74,6 +95,7 @@ jobs:
             archive
 
       - name: Export with Developer ID
+        if: steps.caps.outputs.can_sign == 'true'
         env:
           NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
         run: |
@@ -100,6 +122,7 @@ jobs:
       # The Applications symlink is what makes the familiar "drag me across"
       # install window work.
       - name: Build the DMG
+        if: steps.caps.outputs.can_sign == 'true'
         env:
           MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
@@ -114,6 +137,7 @@ jobs:
           codesign --sign "$MACOS_SIGNING_IDENTITY" --timestamp "DirStat-${VERSION}.dmg"
 
       - name: Notarize and staple
+        if: steps.caps.outputs.can_sign == 'true'
         env:
           NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
           NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
@@ -132,6 +156,7 @@ jobs:
       # ticket Gatekeeper accepts, and an app inside the image whose signature
       # survives with its symlinks intact.
       - name: Verify the DMG the way a user receives it
+        if: steps.caps.outputs.can_sign == 'true'
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
@@ -143,6 +168,7 @@ jobs:
           hdiutil detach /tmp/dmgcheck
 
       - name: Install cosign
+        if: steps.caps.outputs.can_sign == 'true'
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       # Keyless signing: cosign exchanges the job's OIDC token for a
@@ -151,6 +177,7 @@ jobs:
       # writes signature + certificate + tlog proof as one .bundle file
       # (the old --output-signature/--output-certificate flags are gone).
       - name: Sign the DMG (Sigstore keyless)
+        if: steps.caps.outputs.can_sign == 'true'
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
@@ -159,6 +186,7 @@ jobs:
             "DirStat-${VERSION}.dmg"
 
       - name: Create GitHub release with the signed DMG
+        if: steps.caps.outputs.can_sign == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -171,5 +199,5 @@ jobs:
             "DirStat-${VERSION}.dmg.cosign.bundle"
 
       - name: Remove the temporary keychain
-        if: always()
+        if: always() && steps.caps.outputs.can_sign == 'true'
         run: security delete-keychain build.keychain || true
