@@ -7,7 +7,7 @@ final class HapticEngine {
 
     static let shared = HapticEngine()
     private let p = NSHapticFeedbackManager.defaultPerformer
-    private var lastID: UUID?
+    private var lastID: Int?
 
     private var isEnabled: Bool {
         UserDefaults.standard.object(forKey: "hapticFeedbackEnabled") as? Bool ?? true
@@ -15,7 +15,7 @@ final class HapticEngine {
 
     // ── Hover ────────────────────────────────────────────────────────────────
 
-    func hoverEntered(_ node: FSNode) {
+    func hoverEntered(_ node: FileNode) {
         guard isEnabled, node.id != lastID else { return }
         lastID = node.id
 
@@ -51,7 +51,7 @@ final class HapticEngine {
 
     /// Choose pattern + tap-count based on node size.
     /// Directories always feel like a firm "snap" (alignment).
-    private func feedback(for node: FSNode) -> (NSHapticFeedbackManager.FeedbackPattern, Int) {
+    private func feedback(for node: FileNode) -> (NSHapticFeedbackManager.FeedbackPattern, Int) {
         if node.isDirectory {
             return (.alignment, 1)
         }

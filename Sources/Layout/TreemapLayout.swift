@@ -21,7 +21,7 @@ public struct TreemapLayout {
     // Gentle per-depth darkening so deep files stay recognisable
     private static let depthDarken: [Double] = [0.0, 0.10, 0.18, 0.26, 0.32, 0.38]
 
-    public static func compute(root: FSNode, in rect: CGRect, colorMap: ExtensionColorMap) -> [TreemapCell] {
+    public static func compute(root: FileNode, in rect: CGRect, colorMap: ExtensionColorMap) -> [TreemapCell] {
         var cells: [TreemapCell] = []
         guard rect.width > 1, rect.height > 1, root.size > 0 else { return cells }
 
@@ -41,7 +41,7 @@ public struct TreemapLayout {
     }
 
     private static func layout(
-        _ children: [FSNode],
+        _ children: [FileNode],
         parentStart: Double,
         parentEnd: Double,
         depth: Int,
@@ -95,11 +95,20 @@ public struct TreemapLayout {
 
     // ── Color assignment ─────────────────────────────────────────────────────
 
-    private static func color(for node: FSNode, depth: Int, colorMap: ExtensionColorMap) -> Color {
+    static func directoryHue(for name: String) -> Double {
+        let hash = name.utf8.reduce(UInt32(5381)) { ($0 &<< 5) &+ $0 &+ UInt32($1) }
+        return Double(hash % 360) / 360.0
+    }
+
+    private static func color(for node: FileNode, depth: Int, colorMap: ExtensionColorMap) -> Color {
+        if node.isSynthetic {
+            // Distinct muted gray so the hidden-space reconciliation node reads as
+            // "not a real file" at a glance, rather than blending into the chart.
+            return Color(hue: 0, saturation: 0, brightness: 0.35)
+        }
         if node.isDirectory {
             // Directories: muted tinted containers — hue from name hash, low saturation
-            let hash = abs(node.name.hashValue) % 360
-            let hue  = Double(hash) / 360.0
+            let hue  = directoryHue(for: node.name)
             let fade = Double(depth) * 0.05
             return Color(hue: hue,
                          saturation: max(0.12, 0.28 - fade),

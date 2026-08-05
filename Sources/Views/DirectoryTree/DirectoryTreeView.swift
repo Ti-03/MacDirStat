@@ -40,14 +40,13 @@ struct DirectoryTreeView: View {
                                     Label("Open in Chart", systemImage: "arrow.down.right.circle")
                                 }
                             }
-                            Divider()
-                            Button(role: .destructive) {
-                                if let _ = try? FileManager.default.trashItem(at: node.url, resultingItemURL: nil),
-                                   let root = vm.root {
-                                    vm.scan(url: root.url)
+                            if !vm.isReadOnlySnapshot {
+                                Divider()
+                                Button(role: .destructive) {
+                                    vm.trashNode(node)
+                                } label: {
+                                    Label("Move to Trash", systemImage: "trash")
                                 }
-                            } label: {
-                                Label("Move to Trash", systemImage: "trash")
                             }
                         }
                 }
@@ -84,7 +83,7 @@ private struct ScanningPlaceholder: View {
 }
 
 private struct NodeRow: View {
-    let node: FSNode
+    let node: FileNode
     let isSelected: Bool
 
     var body: some View {
@@ -129,6 +128,22 @@ private struct NodeRow: View {
                     .font(.system(size: 9))
                     .foregroundStyle(.red.opacity(0.8))
                     .help(SafetyAnalyzer.reason(for: node) ?? "Do not delete")
+            }
+
+            if node.isAccessDenied {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .help("Contents couldn't be read — Full Disk Access may be required")
+            }
+
+            if node.isAutoSummarized {
+                Text("(\(node.descendantFileCount) files, summarized)")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.55) : Color.secondary.opacity(0.65))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .help("Collapsed to keep the scan fast: contents aren't browsable individually")
             }
 
             // Size

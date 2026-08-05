@@ -24,6 +24,7 @@ struct DuplicatesView: View {
                                 index: index,
                                 group: group,
                                 isExpanded: expanded.contains(index),
+                                isReadOnly: vm.isReadOnlySnapshot,
                                 onToggle: {
                                     withAnimation(.easeInOut(duration: 0.15)) {
                                         if expanded.contains(index) { expanded.remove(index) }
@@ -45,7 +46,7 @@ struct DuplicatesView: View {
     // MARK: - Summary bar
 
     @ViewBuilder
-    private func summaryBar(groups: [[FSNode]]) -> some View {
+    private func summaryBar(groups: [[FileNode]]) -> some View {
         let totalWasted = groups.reduce(Int64(0)) { $0 + $1[0].size * Int64($1.count - 1) }
         let totalFiles  = groups.reduce(0) { $0 + $1.count - 1 }
 
@@ -58,13 +59,15 @@ struct DuplicatesView: View {
                   systemImage: "externaldrive.badge.minus")
                 .font(.caption).foregroundStyle(.orange)
             Spacer()
-            Button(role: .destructive) { deleteAll(groups: groups) } label: {
-                Label("Delete All Duplicates", systemImage: "trash")
-                    .font(.caption.weight(.medium))
+            if !vm.isReadOnlySnapshot {
+                Button(role: .destructive) { deleteAll(groups: groups) } label: {
+                    Label("Delete All Duplicates", systemImage: "trash")
+                        .font(.caption.weight(.medium))
+                }
+                .glassButton()
+                .tint(.red)
+                .controlSize(.small)
             }
-            .glassButton()
-            .tint(.red)
-            .controlSize(.small)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -73,35 +76,16 @@ struct DuplicatesView: View {
 
     // MARK: - Delete helpers
 
-    private func deleteAll(groups: [[FSNode]]) {
-        guard let rootURL = vm.root?.url else { return }
-        var deleted = false
-        for group in groups {
-            for node in group.dropFirst() {
-                if (try? FileManager.default.trashItem(at: node.url, resultingItemURL: nil)) != nil {
-                    deleted = true
-                }
-            }
-        }
-        if deleted { vm.scan(url: rootURL) }
+    private func deleteAll(groups: [[FileNode]]) {
+        vm.trashNodes(groups.flatMap { $0.dropFirst() })
     }
 
-    private func deleteGroup(_ group: [FSNode]) {
-        guard let rootURL = vm.root?.url else { return }
-        var deleted = false
-        for node in group.dropFirst() {
-            if (try? FileManager.default.trashItem(at: node.url, resultingItemURL: nil)) != nil {
-                deleted = true
-            }
-        }
-        if deleted { vm.scan(url: rootURL) }
+    private func deleteGroup(_ group: [FileNode]) {
+        vm.trashNodes(Array(group.dropFirst()))
     }
 
-    private func deleteNode(_ node: FSNode) {
-        guard let rootURL = vm.root?.url else { return }
-        if (try? FileManager.default.trashItem(at: node.url, resultingItemURL: nil)) != nil {
-            vm.scan(url: rootURL)
-        }
+    private func deleteNode(_ node: FileNode) {
+        vm.trashNode(node)
     }
 }
 
@@ -109,11 +93,12 @@ struct DuplicatesView: View {
 
 private struct GroupSection: View {
     let index: Int
-    let group: [FSNode]
+    let group: [FileNode]
     let isExpanded: Bool
+    let isReadOnly: Bool
     let onToggle: () -> Void
     let onDeleteGroup: () -> Void
-    let onDeleteNode: (FSNode) -> Void
+    let onDeleteNode: (FileNode) -> Void
 
     private var wasted: Int64 { group[0].size * Int64(group.count - 1) }
 
@@ -153,15 +138,17 @@ private struct GroupSection: View {
                             .frame(maxWidth: 180, alignment: .trailing)
                     }
 
-                    Button(role: .destructive, action: onDeleteGroup) {
-                        Label("Keep 1, Delete \(group.count - 1)", systemImage: "trash")
-                            .font(.system(size: 11, weight: .medium))
+                    if !isReadOnly {
+                        Button(role: .destructive, action: onDeleteGroup) {
+                            Label("Keep 1, Delete \(group.count - 1)", systemImage: "trash")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .glassButton()
+                        .tint(.red)
+                        .controlSize(.mini)
+                        // Don't let the delete button trigger the expand toggle
+                        .onTapGesture {}
                     }
-                    .glassButton()
-                    .tint(.red)
-                    .controlSize(.mini)
-                    // Don't let the delete button trigger the expand toggle
-                    .onTapGesture {}
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
@@ -173,7 +160,7 @@ private struct GroupSection: View {
             if isExpanded {
                 VStack(spacing: 0) {
                     ForEach(Array(group.enumerated()), id: \.element.id) { i, node in
-                        FileRow(node: node, isKeep: i == 0) { onDeleteNode(node) }
+                        FileRow(node: node, isKeep: i == 0, isReadOnly: isReadOnly) { onDeleteNode(node) }
                         if i < group.count - 1 {
                             Divider().padding(.leading, 52)
                         }
@@ -189,8 +176,9 @@ private struct GroupSection: View {
 // MARK: - File row
 
 private struct FileRow: View {
-    let node: FSNode
+    let node: FileNode
     let isKeep: Bool
+    let isReadOnly: Bool
     let onDelete: () -> Void
     @State private var isHovered = false
 
@@ -228,7 +216,7 @@ private struct FileRow: View {
                 .foregroundStyle(.secondary)
                 .fixedSize()
 
-            if isKeep {
+            if isKeep || isReadOnly {
                 Color.clear.frame(width: 24, height: 24)
             } else {
                 Button(action: onDelete) {
@@ -253,7 +241,7 @@ private struct FileRow: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(node.url.path, forType: .string)
             }
-            if !isKeep {
+            if !isKeep && !isReadOnly {
                 Divider()
                 Button(role: .destructive, action: onDelete) {
                     Label("Move to Trash", systemImage: "trash")

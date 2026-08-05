@@ -26,6 +26,16 @@ final class TreemapLayoutTests: XCTestCase {
         XCTAssertNotEqual(map.color(for: "pdf"), map.color(for: "mp4"))
     }
 
+    func test_directory_hue_is_deterministic_and_bounded() {
+        let name = "Documents"
+        let expected = name.utf8.reduce(UInt32(5381)) { ($0 &<< 5) &+ $0 &+ UInt32($1) }
+        let hue = TreemapLayout.directoryHue(for: name)
+        XCTAssertEqual(hue, Double(expected % 360) / 360.0)
+        XCTAssertGreaterThanOrEqual(hue, 0)
+        XCTAssertLessThan(hue, 1)
+        XCTAssertNotEqual(TreemapLayout.directoryHue(for: "aaa"), TreemapLayout.directoryHue(for: "zzz"))
+    }
+
     func test_byte_formatter_kb() {
         XCTAssertEqual(ByteFormatter.string(from: 1_000), "1.0 KB")
     }
@@ -44,7 +54,10 @@ final class TreemapLayoutTests: XCTestCase {
 
     // MARK: - Helpers
 
-    func makeTree(_ files: [(String, Int64)]) -> FSNode {
+    // Builds an FSNode fixture (as before) and converts it to a FileTree,
+    // returning a FileNode handle onto its root — TreemapLayout/ExtensionColorMap
+    // are now FileNode-based, but the fixture construction itself is unchanged.
+    func makeTree(_ files: [(String, Int64)]) -> FileNode {
         let root = FSNode(url: URL(fileURLWithPath: "/"), name: "/", isDirectory: true, size: 0, fileExtension: "", parent: nil)
         for (name, size) in files {
             let ext = (name as NSString).pathExtension.lowercased()
@@ -52,7 +65,8 @@ final class TreemapLayoutTests: XCTestCase {
             root.children.append(child)
             root.size += size
         }
-        return root
+        let tree = FileTreeBuilder.build(from: root, rootPath: "/")
+        return FileNode(tree: tree, index: tree.rootIndex)
     }
 
     // The layout is a radial sunburst: a node's children fill the angular range
@@ -110,7 +124,7 @@ final class TreemapLayoutTests: XCTestCase {
     }
 
     func test_layout_empty_children_returns_no_cells() {
-        let root = FSNode(url: URL(fileURLWithPath: "/"), name: "/", isDirectory: true, size: 0, fileExtension: "", parent: nil)
+        let root = makeTree([])
         let map = ExtensionColorMap(root: root)
         let cells = TreemapLayout.compute(root: root, in: CGRect(x: 0, y: 0, width: 400, height: 400), colorMap: map)
         XCTAssertTrue(cells.isEmpty)

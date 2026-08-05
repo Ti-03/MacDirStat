@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum FileTypeIcon {
-    static func systemName(for node: FSNode) -> String {
+    static func systemName(for node: FileNode) -> String {
         node.isDirectory ? "folder.fill" : systemName(forExt: node.fileExtension)
     }
 
@@ -48,7 +48,7 @@ enum FileTypeIcon {
         }
     }
 
-    static func color(for node: FSNode) -> Color {
+    static func color(for node: FileNode) -> Color {
         node.isDirectory ? .yellow : color(forExt: node.fileExtension)
     }
 

@@ -95,7 +95,10 @@ struct ContentView: View {
                 }
                 .help("Settings & About")
                 .popover(isPresented: $showingSettings, arrowEdge: .bottom) {
-                    DashboardSettingsView()
+                    // Passed explicitly rather than relying on the popover
+                    // inheriting it, so the Permissions section can't crash
+                    // looking for a missing environment object.
+                    DashboardSettingsView().environmentObject(vm)
                 }
             }
         }
@@ -109,6 +112,12 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .exportCSV)) { _ in
             vm.exportCSV()
+        }
+        .sheet(isPresented: $vm.showFDASheet) {
+            FullDiskAccessSheet()
+        }
+        .sheet(isPresented: $vm.showComparisonSheet) {
+            ComparisonView()
         }
     }
 
@@ -190,8 +199,13 @@ struct ContentView: View {
     @ViewBuilder
     private var detailContent: some View {
         VStack(spacing: 0) {
-            if !vm.hasFullDiskAccess {
-                FullDiskAccessBanner()
+            if vm.isReadOnlySnapshot {
+                SnapshotBanner(date: vm.snapshotDate)
+            }
+            if !vm.hasFullDiskAccess || (vm.deniedCount > 0 && !vm.isScanning) {
+                FullDiskAccessBanner(hasFullDiskAccess: vm.hasFullDiskAccess, deniedCount: vm.deniedCount) {
+                    vm.showFDASheet = true
+                }
             }
             if vm.root == nil && !vm.isScanning && !vm.isComputingLayout {
                 WelcomeView()
@@ -374,6 +388,20 @@ private struct FolderTitleView: View {
 // MARK: - Full Disk Access banner
 
 private struct FullDiskAccessBanner: View {
+    let hasFullDiskAccess: Bool
+    let deniedCount: Int
+    let onOpenSheet: () -> Void
+
+    private let title = "Full Disk Access required for complete results"
+
+    private var subtitle: String {
+        if !hasFullDiskAccess {
+            return "Go to System Settings → Privacy & Security → Full Disk Access and add DirStat."
+        }
+        let folders = deniedCount == 1 ? "1 folder" : "\(deniedCount) folders"
+        return "\(folders) couldn't be read. Grant Full Disk Access for a complete scan."
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "lock.shield")
@@ -381,21 +409,19 @@ private struct FullDiskAccessBanner: View {
                 .foregroundStyle(.orange)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text("Full Disk Access required for complete results")
+                Text(title)
                     .font(.system(size: 12, weight: .semibold))
-                Text("Go to System Settings → Privacy & Security → Full Disk Access and add DirStat.")
+                Text(subtitle)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
 
             Spacer()
 
-            Button("Open Settings") {
-                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
-            }
-            .font(.system(size: 11, weight: .medium))
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            Button("Open Settings", action: onOpenSheet)
+                .font(.system(size: 11, weight: .medium))
+                .buttonStyle(.bordered)
+                .controlSize(.small)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
@@ -404,9 +430,50 @@ private struct FullDiskAccessBanner: View {
     }
 }
 
+// MARK: - Read-only snapshot banner
+
+// Shown whenever `vm.tree` was loaded from a `.mdscan` archive instead of a
+// live scan. Trash/delete actions are already disabled at the ScanViewModel
+// level (`trashNodes` no-ops while `isReadOnlySnapshot` is set); this is
+// just the visible explanation of why.
+private struct SnapshotBanner: View {
+    let date: Date?
+
+    private var subtitle: String {
+        guard let date else { return "Opened from a saved scan. Delete actions are disabled." }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return "Saved \(formatter.string(from: date)). Delete actions are disabled."
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "camera.aperture")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.blue)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Read-only snapshot")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(.blue.opacity(0.15))
+        .overlay(alignment: .bottom) { Divider().overlay(.blue.opacity(0.3)) }
+    }
+}
+
 // MARK: - Dashboard settings popover
 
 private struct DashboardSettingsView: View {
+    @EnvironmentObject private var vm: ScanViewModel
     @AppStorage("hapticFeedbackEnabled") private var hapticEnabled = true
     @AppStorage("useBinarySize")         private var useBinarySize = false
     @AppStorage("showHiddenFiles")       private var showHiddenFiles = false
@@ -487,6 +554,34 @@ private struct DashboardSettingsView: View {
 
                 Divider()
 
+                settingsSection("Permissions") {
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(vm.hasFullDiskAccess ? Color.green : Color.orange)
+                            .frame(width: 7, height: 7)
+                        Text(vm.hasFullDiskAccess ? "Full Disk Access looks granted" : "Full Disk Access not granted")
+                            .font(.system(size: 12))
+                    }
+
+                    // The grant is per exact copy of the app, so the surest
+                    // route is dragging this bundle in rather than hunting for
+                    // it with the "+" picker and possibly adding another build.
+                    FullDiskAccessDragTile()
+
+                    Button("Open Full Disk Access settings") {
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
+                    }
+                    .controlSize(.small)
+
+                    if vm.hasFullDiskAccess && vm.deniedCount > 0 {
+                        caption("\(vm.deniedCount) folders were still unreadable in the last scan. If DirStat is already listed, remove it with “−” and drag this copy in again — macOS ties the grant to one exact copy.")
+                    } else {
+                        caption("Without it, protected folders scan as 0 bytes and land in “Hidden & Unreadable Space”.")
+                    }
+                }
+
+                Divider()
+
                 settingsSection("Trackpad") {
                     Toggle("Haptic feedback", isOn: $hapticEnabled)
                         .toggleStyle(.switch).controlSize(.small)
@@ -515,6 +610,17 @@ private struct DashboardSettingsView: View {
             }
         }
         .frame(width: 300, height: 520)
+        // The grant can change while this popover is open (the user drags the
+        // icon into System Settings and comes straight back), and macOS has no
+        // notification for it, so re-probe on appear and then periodically.
+        .onAppear { vm.recheckFullDiskAccess() }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1.5))
+                guard !Task.isCancelled else { break }
+                vm.recheckFullDiskAccess()
+            }
+        }
     }
 
     @ViewBuilder

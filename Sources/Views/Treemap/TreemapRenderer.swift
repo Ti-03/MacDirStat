@@ -6,8 +6,8 @@ struct TreemapRenderer {
 
     static func draw(
         cells: [TreemapCell],
-        hoveredNode: FSNode?,
-        selectedNode: FSNode?,
+        hoveredNode: FileNode?,
+        selectedNode: FileNode?,
         highlightedExtension: String?,
         duplicatesReady: Bool,
         pulsePhase: Double,

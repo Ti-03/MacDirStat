@@ -33,7 +33,7 @@ public struct ExtensionColorMap: Equatable, Sendable {
 
     let scheme: String
 
-    public init(root: FSNode) {
+    public init(root: FileNode) {
         self.scheme = UserDefaults.standard.string(forKey: "treemapColorScheme") ?? "byType"
     }
 
