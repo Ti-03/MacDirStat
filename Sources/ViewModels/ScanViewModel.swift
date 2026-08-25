@@ -87,10 +87,49 @@ public final class ScanViewModel: ObservableObject {
 
         if !resumedPendingRescan,
            UserDefaults.standard.bool(forKey: "autoScanLastFolder"),
-           let path = UserDefaults.standard.string(forKey: "lastScannedPath"),
-           FileManager.default.fileExists(atPath: path) {
-            scan(url: URL(fileURLWithPath: path))
+           let last = Self.resolveLastScannedFolder() {
+            scan(url: last)
         }
+    }
+
+    // MARK: - Last scanned folder
+
+    static let lastScannedBookmarkKey = "lastScannedBookmark"
+
+    /// A sandboxed build loses access to a folder the moment the process exits, so
+    /// "auto-scan last folder" needs a security-scoped bookmark, not a bare path.
+    /// Must be called while the security scope for `url` is still held.
+    static func rememberLastScannedFolder(_ url: URL) {
+        UserDefaults.standard.set(url.path, forKey: "lastScannedPath")
+        guard Build.isAppStore else { return }
+        if let data = try? url.bookmarkData(options: .withSecurityScope,
+                                            includingResourceValuesForKeys: nil,
+                                            relativeTo: nil) {
+            UserDefaults.standard.set(data, forKey: lastScannedBookmarkKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: lastScannedBookmarkKey)
+        }
+    }
+
+    /// The folder to resume on launch, or nil if there isn't a usable one.
+    static func resolveLastScannedFolder() -> URL? {
+        guard Build.isAppStore else {
+            guard let path = UserDefaults.standard.string(forKey: "lastScannedPath"),
+                  FileManager.default.fileExists(atPath: path) else { return nil }
+            return URL(fileURLWithPath: path)
+        }
+        guard let data = UserDefaults.standard.data(forKey: lastScannedBookmarkKey) else { return nil }
+        var stale = false
+        // A stale bookmark still resolves; scan(url:) records a fresh one on the
+        // way through, so there's nothing to repair here.
+        guard let url = try? URL(resolvingBookmarkData: data,
+                                 options: .withSecurityScope,
+                                 relativeTo: nil,
+                                 bookmarkDataIsStale: &stale) else {
+            UserDefaults.standard.removeObject(forKey: lastScannedBookmarkKey)
+            return nil
+        }
+        return url
     }
 
     deinit {
@@ -98,6 +137,14 @@ public final class ScanViewModel: ObservableObject {
     }
 
     private func checkFullDiskAccess() {
+        // A sandboxed App Store build can never hold Full Disk Access, so the
+        // probe would always fail and the app would nag about a permission the
+        // user cannot grant. Report satisfied and let the open panel be the
+        // only way in.
+        guard !Build.isAppStore else {
+            hasFullDiskAccess = true
+            return
+        }
         // TCC.db is only readable when Full Disk Access is granted
         let probe = "/Library/Application Support/com.apple.TCC/TCC.db"
         hasFullDiskAccess = FileManager.default.isReadableFile(atPath: probe)
@@ -171,7 +218,7 @@ public final class ScanViewModel: ObservableObject {
         hasStaleResults = false
         layoutGeneration += 1       // invalidate any in-progress layout
         scanURL = url
-        UserDefaults.standard.set(url.path, forKey: "lastScannedPath")
+        Self.rememberLastScannedFolder(url)
         isReadOnlySnapshot = false
         snapshotDate = nil
         tree = nil
@@ -1208,6 +1255,10 @@ public final class ScanViewModel: ObservableObject {
         highlightedExtension = nil
         errorMessage = nil
         UserDefaults.standard.set(metadata.scannedPath, forKey: "lastScannedPath")
+        // Reopening an archive gives no access to the folder it describes, so any
+        // bookmark from an earlier live scan is now out of step with the recorded
+        // path. Drop it rather than let auto-scan resume a different folder.
+        UserDefaults.standard.removeObject(forKey: Self.lastScannedBookmarkKey)
 
         self.tree = tree
         let rootNode = FileNode(tree: tree, index: tree.rootIndex)
