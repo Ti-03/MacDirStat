@@ -33,5 +33,11 @@
 	<string>public.app-category.utilities</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<!-- The only crypto here is CryptoKit SHA256, used to fingerprint files for
+	     duplicate detection. Hashing is not encryption, and nothing in the app
+	     encrypts anything, so the export-compliance answer is no. Declaring it
+	     here means App Store Connect stops asking on every upload. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>
