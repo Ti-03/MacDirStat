@@ -22,6 +22,16 @@ turned the sandbox off in commit `319117c` so Full Disk Access would work. The
 App Store listing was left behind at 1.0, because the tree could no longer
 produce a build the store would accept.
 
+Store builds 1.0 and 1.1 were cut from a **second clone** at
+`~/Documents/Projects/MacDirStat-appstore`, where the App Store adaptation
+(Sparkle torn out of the pbxproj, `Package.swift`, `Info.plist` and
+`MacDirStatApp.swift`; sandbox back on; a Privacy Policy link; quit-on-last-window)
+lived as permanently **uncommitted working-tree edits**. That works exactly once.
+The edits can't be reviewed, `git checkout` discards them, and the clone stayed
+pinned at `e85159a` while the real work moved on, so shipping a current build
+meant pulling forty-odd commits and re-applying that diff over conflicts in the
+two files it touches most.
+
 ## Decision
 
 One app target, three build configurations. `AppStore` differs from `Release`
@@ -72,3 +82,11 @@ ever gets fragile, the second target is the upgrade path.
   "Mac Team Store Provisioning Profile: com.macdirstat.app" is valid to
   2027-05-03.
 - The two tracks now share a version number. Both read `MARKETING_VERSION`.
+- `~/Documents/Projects/MacDirStat-appstore` is superseded and should be deleted
+  once a store build has shipped from this tree. Leaving it around invites a
+  future release being cut from a clone that is missing everything since
+  `e85159a`.
+- One thing that clone did was request `files.user-selected.read-only`. That does
+  not permit moving files to the Trash, so right-click delete and the duplicates
+  view could not have worked in the shipped store build. This tree asks for
+  read-write.
