@@ -1,15 +1,34 @@
 import SwiftUI
+#if !APPSTORE
 import Sparkle
+#endif
 import UniformTypeIdentifiers
+
+/// Which distribution channel this binary was built for. The `APPSTORE`
+/// compilation condition is set only by the AppStore build configuration.
+///
+/// App Store builds are sandboxed, which rules out two things the Developer ID
+/// build relies on: Sparkle self-updates (App Review guideline 2.4.5) and Full
+/// Disk Access (a sandboxed app can never hold it, so the onboarding flow would
+/// send users to System Settings for nothing).
+enum Build {
+    #if APPSTORE
+    static let isAppStore = true
+    #else
+    static let isAppStore = false
+    #endif
+}
 
 @main
 struct MacDirStatApp: App {
     @StateObject private var vm = ScanViewModel()
+    #if !APPSTORE
     private let updaterController = SPUStandardUpdaterController(
         startingUpdater: true,
         updaterDelegate: nil,
         userDriverDelegate: nil
     )
+    #endif
 
     var body: some Scene {
         WindowGroup("DirStat") {
@@ -51,16 +70,20 @@ struct MacDirStatApp: App {
                 .disabled(vm.tree == nil)
             }
             CommandGroup(after: .appInfo) {
+                #if !APPSTORE
                 Button("Check for Updates…") {
                     updaterController.checkForUpdates(nil)
                 }
+                #endif
                 Button("Visit Website") {
                     NSWorkspace.shared.open(URL(string: "https://ti-03.github.io/MacDirStat/")!)
                 }
             }
             CommandGroup(after: .help) {
-                Button("Grant Full Disk Access…") {
-                    vm.showFDASheet = true
+                if !Build.isAppStore {
+                    Button("Grant Full Disk Access…") {
+                        vm.showFDASheet = true
+                    }
                 }
             }
         }

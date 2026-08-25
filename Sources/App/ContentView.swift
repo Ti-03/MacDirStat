@@ -202,7 +202,10 @@ struct ContentView: View {
             if vm.isReadOnlySnapshot {
                 SnapshotBanner(date: vm.snapshotDate)
             }
-            if !vm.hasFullDiskAccess || (vm.deniedCount > 0 && !vm.isScanning) {
+            // The banner's whole call to action is Full Disk Access, which a
+            // sandboxed App Store build can't use. Blocked folders there are a
+            // fact of the sandbox, not something the user can fix.
+            if !Build.isAppStore, !vm.hasFullDiskAccess || (vm.deniedCount > 0 && !vm.isScanning) {
                 FullDiskAccessBanner(hasFullDiskAccess: vm.hasFullDiskAccess, deniedCount: vm.deniedCount) {
                     vm.showFDASheet = true
                 }
@@ -552,6 +555,10 @@ private struct DashboardSettingsView: View {
                     caption("Watch for file changes after scanning (uses FSEvents).")
                 }
 
+                // Nothing in this section applies to a sandboxed App Store
+                // build: the grant can't be held, so the status light, the drag
+                // tile and the settings shortcut would all be dead ends.
+                if !Build.isAppStore {
                 Divider()
 
                 settingsSection("Permissions") {
@@ -578,6 +585,7 @@ private struct DashboardSettingsView: View {
                     } else {
                         caption("Without it, protected folders scan as 0 bytes and land in “Hidden & Unreadable Space”.")
                     }
+                }
                 }
 
                 Divider()
