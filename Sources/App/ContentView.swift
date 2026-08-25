@@ -612,6 +612,10 @@ private struct DashboardSettingsView: View {
                     }
                     Link("ti0.me", destination: URL(string: "http://ti0.me/")!)
                         .font(.caption)
+                    // App Review wants a reachable privacy policy, and it's
+                    // worth having in the Developer ID build too.
+                    Link("Privacy Policy", destination: URL(string: "https://ti-03.github.io/MacDirStat/privacy")!)
+                        .font(.caption)
                 }
                 .frame(maxWidth: .infinity)
                 .padding()

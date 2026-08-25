@@ -19,8 +19,18 @@ enum Build {
     #endif
 }
 
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    // The App Store build quits with its last window, matching how 1.0 shipped.
+    // The Developer ID build stays resident so its Sparkle updater keeps
+    // running, which is the whole point of that track.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        Build.isAppStore
+    }
+}
+
 @main
 struct MacDirStatApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var vm = ScanViewModel()
     #if !APPSTORE
     private let updaterController = SPUStandardUpdaterController(
