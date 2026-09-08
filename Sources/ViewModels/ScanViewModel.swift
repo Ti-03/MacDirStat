@@ -58,6 +58,11 @@ public final class ScanViewModel: ObservableObject {
     private var securityScopedURL: URL?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var fdaSheetShownThisLaunch = false
+    // Bumped by every scan(), openArchive() and cancelScan(). Work that resumes
+    // on the main actor after an await compares against it, so a finished
+    // scan A can't install its tree over scan B that started meanwhile, and a
+    // slow archive decode can't flip a newer live scan into a read-only snapshot.
+    private var scanGeneration = 0
 
     public init() {
         Self.migrateLegacyExclusionDefault(in: UserDefaults.standard)
@@ -248,6 +253,8 @@ public final class ScanViewModel: ObservableObject {
         isWatching = false
         hasStaleResults = false
         layoutGeneration += 1       // invalidate any in-progress layout
+        scanGeneration += 1
+        let generation = scanGeneration
         scanURL = url
         Self.rememberLastScannedFolder(url)
         isReadOnlySnapshot = false
@@ -309,12 +316,15 @@ public final class ScanViewModel: ObservableObject {
                     await Task.detached(priority: .userInitiated) {
                         Self.tagSafetyLevels(tree: finalTree)
                     }.value
+                    // A newer scan/archive/cancel superseded this one while tagging ran.
+                    guard self.scanGeneration == generation else { return }
                     self.tree = finalTree
                     let rootNode = FileNode(tree: finalTree, index: finalTree.rootIndex)
                     let map = ExtensionColorMap(root: rootNode)
                     self.colorMap = map
                     await self.recomputeLayout()
                     // isComputingLayout set to false inside recomputeLayout
+                    guard self.scanGeneration == generation else { return }
 
                     // Start live file watching (if enabled)
                     if UserDefaults.standard.bool(forKey: "realtimeMonitoring") {
@@ -352,6 +362,7 @@ public final class ScanViewModel: ObservableObject {
 
     public func cancelScan() {
         Task { await scanner.cancel() }
+        scanGeneration += 1
         scanTask?.cancel()
         extensionTask?.cancel()
         duplicateTask?.cancel()
@@ -434,18 +445,31 @@ public final class ScanViewModel: ObservableObject {
             return
         }
 
-        var workingTree = startingTree
-        var skippedUnspliceable = false
-        for changedPath in paths {
-            guard let spliced = Self.splicedTree(afterChangeAt: changedPath, in: workingTree) else {
-                if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
-                    FileHandle.standardError.write("REFRESH skipped-unspliceable path=\(changedPath)\n".data(using: .utf8)!)
+        // Each splice re-walks the changed directory on disk and copies the
+        // whole record array; on a large tree with a build running that is
+        // hundreds of milliseconds per FSEvents batch, so it runs off the main
+        // actor. Everything it needs is immutable (`splicedTree` is a
+        // nonisolated static over a FileTree whose topology never changes).
+        let debug = ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil
+        let (workingTree, skippedUnspliceable) = await Task.detached(priority: .utility) { () -> (FileTree, Bool) in
+            var working = startingTree
+            var skipped = false
+            for changedPath in paths {
+                guard let spliced = Self.splicedTree(afterChangeAt: changedPath, in: working) else {
+                    if debug {
+                        FileHandle.standardError.write("REFRESH skipped-unspliceable path=\(changedPath)\n".data(using: .utf8)!)
+                    }
+                    skipped = true
+                    continue
                 }
-                skippedUnspliceable = true
-                continue
+                working = spliced
             }
-            workingTree = spliced
-        }
+            return (working, skipped)
+        }.value
+
+        // A trash, a new scan or an opened archive replaced `tree` meanwhile:
+        // this result was derived from a tree that is no longer on screen.
+        guard tree === startingTree else { return }
 
         if skippedUnspliceable { hasStaleResults = true }
 
@@ -666,6 +690,9 @@ public final class ScanViewModel: ObservableObject {
             Self.tagSafetyLevels(tree: newTree)
         }.value
 
+        // A trash or a new scan replaced the tree while tagging ran; installing
+        // this splice would resurrect what the user just deleted.
+        guard tree === oldTree else { return }
         self.tree = newTree
 
         if let selectedPath, let idx = Self.findIndex(forPath: selectedPath, in: newTree) {
@@ -1057,10 +1084,21 @@ public final class ScanViewModel: ObservableObject {
         var trashedIndices: [Int] = []
         trashedIndices.reserveCapacity(nodes.count)
         var failures: [String] = []
-        for node in nodes where ObjectIdentifier(node.tree) == ObjectIdentifier(currentTree) && !node.isSynthetic {
+        for node in nodes where !node.isSynthetic {
+            // Duplicate groups and list rows can outlive a live-refresh splice
+            // and still point at the previous tree instance; resolve them by
+            // path instead of silently dropping the request.
+            let index: Int
+            if node.tree === currentTree {
+                index = node.index
+            } else if let resolved = Self.findIndex(forPath: node.tree.path(of: node.index), in: currentTree) {
+                index = resolved
+            } else {
+                continue
+            }
             do {
-                try FileManager.default.trashItem(at: node.url, resultingItemURL: nil)
-                trashedIndices.append(node.index)
+                try FileManager.default.trashItem(at: URL(fileURLWithPath: currentTree.path(of: index)), resultingItemURL: nil)
+                trashedIndices.append(index)
             } catch {
                 // One failed delete (e.g. permissions) shouldn't block the rest
                 // of the batch, but the user has to hear about it: the item
@@ -1125,11 +1163,20 @@ public final class ScanViewModel: ObservableObject {
             await MainActor.run { self?.extensionSummaries = summaries }
         }
 
+        // If detection was still running when the user trashed something,
+        // cancelling it above would otherwise leave "Scanning for duplicates…"
+        // spinning until the next full rescan, so finish detecting first.
+        let needsDetection = !duplicatesReady
         duplicateTask?.cancel()
         duplicateTask = Task.detached(priority: .utility) { [weak self] in
+            if needsDetection { await DuplicateDetector().detect(in: newTree) }
+            guard !Task.isCancelled else { return }
             let groups = Self.buildDuplicateGroups(tree: newTree)
             guard !Task.isCancelled else { return }
-            await MainActor.run { self?.duplicateGroups = groups }
+            await MainActor.run {
+                self?.duplicatesReady = true
+                self?.duplicateGroups = groups
+            }
         }
 
         Task { await recomputeLayout() }
@@ -1205,7 +1252,12 @@ public final class ScanViewModel: ObservableObject {
 
     private func recomputeLayout() async {
         guard let displayRoot = treemapRoot, let map = colorMap,
-              layoutSize.width > 1, layoutSize.height > 1 else { return }
+              layoutSize.width > 1, layoutSize.height > 1 else {
+            // Nothing is being computed (no size yet, e.g. a scan started from
+            // init before any view exists); `updateLayoutSize` will re-arm.
+            isComputingLayout = false
+            return
+        }
         layoutGeneration += 1
         let myGen = layoutGeneration
         isComputingLayout = true
@@ -1262,6 +1314,9 @@ public final class ScanViewModel: ObservableObject {
     // surfaces as `errorMessage` rather than crashing or hanging — see
     // `ScanArchive.validate()`.
     public func openArchive(from url: URL) {
+        Task { await scanner.cancel() }
+        scanGeneration += 1
+        let generation = scanGeneration
         scanTask?.cancel()
         extensionTask?.cancel()
         duplicateTask?.cancel()
@@ -1283,11 +1338,15 @@ public final class ScanViewModel: ObservableObject {
                 let archive = try decoder.decode(ScanArchive.self, from: data)
                 try archive.validate()
                 let tree = archive.makeTree()
-                await MainActor.run { self?.applyOpenedArchive(tree: tree, metadata: archive.metadata) }
+                await MainActor.run {
+                    guard let self, self.scanGeneration == generation else { return }
+                    self.applyOpenedArchive(tree: tree, metadata: archive.metadata)
+                }
             } catch {
                 await MainActor.run {
-                    self?.isScanning = false
-                    self?.errorMessage = "Couldn't open scan: \(error.localizedDescription)"
+                    guard let self, self.scanGeneration == generation else { return }
+                    self.isScanning = false
+                    self.errorMessage = "Couldn't open scan: \(error.localizedDescription)"
                 }
             }
         }
@@ -1307,11 +1366,9 @@ public final class ScanViewModel: ObservableObject {
         drillStack = []
         highlightedExtension = nil
         errorMessage = nil
-        UserDefaults.standard.set(metadata.scannedPath, forKey: "lastScannedPath")
-        // Reopening an archive gives no access to the folder it describes, so any
-        // bookmark from an earlier live scan is now out of step with the recorded
-        // path. Drop it rather than let auto-scan resume a different folder.
-        UserDefaults.standard.removeObject(forKey: Self.lastScannedBookmarkKey)
+        // Reopening an archive is not a scan of that folder: leave the
+        // "auto-scan last folder" breadcrumb alone so the next launch does not
+        // start walking whatever path the archive happened to record.
 
         self.tree = tree
         let rootNode = FileNode(tree: tree, index: tree.rootIndex)

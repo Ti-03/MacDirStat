@@ -46,6 +46,48 @@ final class DuplicateDetectorTests: XCTestCase {
         XCTAssertNil(tree.records[unique].duplicateGroupID, "unique file must not be grouped")
     }
 
+    // Regression: `record.size` is the ALLOCATED size. Two sparse files that
+    // share their first 64 KB, occupy the same few blocks on disk, but differ
+    // in their tails were declared duplicates because the small-allocated-size
+    // shortcut treated the 64 KB quick hash as a full-content hash.
+    func test_sparse_files_with_same_head_and_different_tail_are_not_duplicates() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        func writeSparse(_ url: URL, tail: UInt8) throws {
+            try Data(repeating: 7, count: 8192).write(to: url)
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seek(toOffset: 4 * 1024 * 1024)
+            try handle.write(contentsOf: Data([tail]))
+        }
+        let a = tmp.appendingPathComponent("a.bin")
+        let b = tmp.appendingPathComponent("b.bin")
+        let c = tmp.appendingPathComponent("c.bin")
+        try writeSparse(a, tail: 1)
+        try writeSparse(b, tail: 2)
+        try writeSparse(c, tail: 1)   // genuinely identical to a
+
+        // `size` in the tree is the ALLOCATED size the scanner records. Pin it
+        // to what a sparse file occupies so the test does not depend on the
+        // filesystem actually punching a hole: the point is that the detector
+        // must not trust a small allocated size as "the quick hash saw it all".
+        let root = FSNode(url: tmp, name: "root", isDirectory: true, size: 0, fileExtension: "", parent: nil)
+        for url in [a, b, c] {
+            let child = FSNode(url: url, name: url.lastPathComponent, isDirectory: false, size: 12_288, fileExtension: "bin", parent: root)
+            root.children.append(child)
+            root.size += child.size
+        }
+        let tree = FileTreeBuilder.build(from: root, rootPath: tmp.path)
+        await DuplicateDetector().detect(in: tree)
+
+        let ia = index(in: tree, named: "a.bin")!, ib = index(in: tree, named: "b.bin")!, ic = index(in: tree, named: "c.bin")!
+        XCTAssertNotNil(tree.records[ia].duplicateGroupID)
+        XCTAssertEqual(tree.records[ia].duplicateGroupID, tree.records[ic].duplicateGroupID, "a and c are identical")
+        XCTAssertNil(tree.records[ib].duplicateGroupID, "b differs in its tail and must not be grouped")
+    }
+
     func test_small_files_below_threshold_are_skipped() async throws {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)

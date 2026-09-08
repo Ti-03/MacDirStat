@@ -40,13 +40,16 @@ public actor DuplicateDetector {
             byQuickHash[key, default: []].append(index)
         }
 
-        // Small-file shortcut: if a file's whole content fits within the quick-hash window,
-        // the quick hash already IS a full-content hash, so those groups are final as-is.
-        // Only groups whose files exceed the quick-hash window need a full-file hash pass.
+        // Small-file shortcut: when the quick hash reached end-of-file, it already
+        // IS a full-content hash, so that group is final. Whether EOF was hit is
+        // part of the hash key (see `partialHash`), never inferred from
+        // `record.size`: that field is the ALLOCATED size, and a sparse or
+        // APFS-compressed file can occupy a few KB on disk while holding
+        // megabytes of content that differ after the first 64 KB.
         var hashGroups: [String: [Int]] = [:]
         var toFullHash: [Int] = []
         for (key, indices) in byQuickHash where indices.count > 1 {
-            if tree.records[indices[0]].size <= Int64(quickHashBytes) {
+            if key.hasSuffix(Self.reachedEOFMarker) {
                 hashGroups[key] = indices
             } else {
                 toFullHash.append(contentsOf: indices)
@@ -133,7 +136,11 @@ public actor DuplicateDetector {
         return results
     }
 
-    // Reads up to `maxBytes` from the file and returns a SHA256 hex string.
+    static let reachedEOFMarker = "-eof"
+
+    // Reads up to `maxBytes` from the file and returns a SHA256 hex string,
+    // suffixed with `reachedEOFMarker` when the whole file fit in the window
+    // (so the caller knows the partial hash is in fact a full-content hash).
     // Each chunk is drained from the autorelease pool immediately to prevent accumulation.
     private static func partialHash(url: URL, maxBytes: Int) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
@@ -141,15 +148,23 @@ public actor DuplicateDetector {
         var hasher = SHA256()
         var remaining = maxBytes
         let chunkSize = min(65_536, maxBytes)
+        var reachedEOF = false
         while remaining > 0 {
             if Task.isCancelled { return nil }
             let toRead = min(chunkSize, remaining)
             let chunk: Data? = autoreleasepool { try? handle.read(upToCount: toRead) }
-            guard let chunk, !chunk.isEmpty else { break }
+            guard let chunk, !chunk.isEmpty else { reachedEOF = true; break }
             hasher.update(data: chunk)
             remaining -= chunk.count
         }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        if !reachedEOF {
+            // Exactly filled the window: peek one byte to tell "file is exactly
+            // maxBytes long" apart from "there is more".
+            let probe: Data? = autoreleasepool { try? handle.read(upToCount: 1) }
+            reachedEOF = (probe?.isEmpty ?? true)
+        }
+        let hex = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return reachedEOF ? hex + reachedEOFMarker : hex
     }
 
     // Full-file SHA256. Each 1 MB chunk is released immediately via autoreleasepool,
