@@ -241,10 +241,13 @@ struct ContentView: View {
         VStack(spacing: 0) {
             if showTree {
                 HSplitView {
+                    // Wide enough that the name column keeps ~120 pt next to
+                    // the fixed size/percent columns; at 220 names shrank to
+                    // three letters.
                     DirectoryTreeView()
-                        .frame(minWidth: 220, idealWidth: 300)
+                        .frame(minWidth: 290, idealWidth: 320)
                     TreemapView()
-                        .frame(minWidth: 300)
+                        .frame(minWidth: 300, idealWidth: 640)
                 }
             } else {
                 TreemapView()

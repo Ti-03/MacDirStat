@@ -19,6 +19,13 @@ struct TreemapRenderer {
         let isSpotlighting = hoveredNode != nil
         let isFiltering    = highlightedExtension != nil
 
+        // Bounding boxes of labels drawn so far; a label that would overlap
+        // one of them is skipped, so adjacent arcs never print on top of each
+        // other ("PlugInsMediaProvMotionEffect.fxp").
+        // The center disc is drawn above the canvas by TreemapView, so it is
+        // reserved up front: inner-ring labels must not run underneath it.
+        var placedLabels: [CGRect] = []
+
         // ── Pass 1 — glow layers (drawn under everything) ───────────────────
         // Selected arc: pulsing halo
         if let sel = selectedNode {
@@ -93,7 +100,7 @@ struct TreemapRenderer {
 
             // Label
             if !isFiltered, !isSpotlit {
-                drawLabel(context: &context, cell: cell, center: center, showFileCount: showFileCount)
+                drawLabel(context: &context, cell: cell, center: center, showFileCount: showFileCount, placedLabels: &placedLabels)
             }
         }
     }
@@ -117,67 +124,115 @@ struct TreemapRenderer {
 
     // MARK: - Labels
 
-    private static func drawLabel(context: inout GraphicsContext, cell: TreemapCell, center: CGPoint, showFileCount: Bool) {
+    private static func drawLabel(context: inout GraphicsContext, cell: TreemapCell, center: CGPoint, showFileCount: Bool, placedLabels: inout [CGRect]) {
         let arcLen = cell.arcLength
         let bandH  = cell.outerRadius - cell.innerRadius
         guard arcLen > 38, bandH > 12 else { return }
 
         let r  = cell.midRadius
-        let cx = center.x + r * cos(cell.midAngle)
-        let cy = center.y + r * sin(cell.midAngle)
-        let pt = CGPoint(x: cx, y: cy)
-        let maxW = min(arcLen - 8, 120.0)
+        let pt = CGPoint(x: center.x + r * cos(cell.midAngle), y: center.y + r * sin(cell.midAngle))
+        let twoLine = arcLen > 72 && bandH > 26
 
         var ctx = context
         ctx.addFilter(.shadow(color: .black.opacity(0.65), radius: 2, x: 0, y: 1))
 
-        if arcLen > 72, bandH > 26 {
-            let nameText = ctx.resolve(
-                Text(cell.node.name)
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundColor(.white)
-            )
-            let sizeText = ctx.resolve(
-                Text(ByteFormatter.string(from: cell.node.size))
-                    .font(.system(size: 8.5, weight: .regular))
-                    .foregroundColor(.white.opacity(0.75))
-            )
+        let sizeText = ctx.resolve(
+            Text(ByteFormatter.string(from: cell.node.size))
+                .font(.system(size: 8.5, weight: .regular))
+                .foregroundColor(.white.opacity(0.75))
+        )
+        let showCount = twoLine && showFileCount && cell.node.isDirectory && !cell.node.children.isEmpty
+        let countText: GraphicsContext.ResolvedText? = showCount ? ctx.resolve(
+            Text(cell.node.itemCountLabel)
+                .font(.system(size: 7.5, weight: .regular))
+                .foregroundColor(.white.opacity(0.55))
+        ) : nil
+        let ss = twoLine ? sizeText.measure(in: unbounded) : .zero
+        let cs = countText?.measure(in: unbounded) ?? .zero
+        let gap: CGFloat = 2
 
-            let showCount = showFileCount && cell.node.isDirectory && !cell.node.children.isEmpty
-            let countText: GraphicsContext.ResolvedText? = showCount ? ctx.resolve(
-                Text("\(cell.node.children.count) items")
-                    .font(.system(size: 7.5, weight: .regular))
-                    .foregroundColor(.white.opacity(0.55))
-            ) : nil
-
-            let ns = nameText.measure(in: CGSize(width: maxW, height: 20))
-            guard ns.width <= maxW else { return }
-            let ss = sizeText.measure(in: CGSize(width: maxW, height: 16))
-            let cs = countText?.measure(in: CGSize(width: maxW, height: 14)) ?? .zero
-            let gap: CGFloat = 2
-            var blockH = ns.height + gap + ss.height
+        // Start at the widest label the arc allows and narrow it until the
+        // block clears the center disc (inner ring labels are often wider than
+        // the ring is deep). A block that collides with another label is
+        // simply dropped: shrinking would not move it out of the way.
+        var maxW = min(arcLen - 8, 120.0)
+        while maxW >= 30 {
+            guard let (nameText, ns) = fittedName(cell.node.name, size: twoLine ? 10.5 : 9.5, weight: twoLine ? .semibold : .medium, maxW: maxW, ctx: ctx) else { return }
+            var blockH = ns.height
+            if twoLine { blockH += gap + ss.height }
             if countText != nil { blockH += gap + cs.height }
+            let blockW = max(ns.width, twoLine ? ss.width : 0, cs.width)
+
+            // Slide outward along the radius (staying inside the arc's own
+            // band) before giving up width: inner-ring labels are usually
+            // wider than the band is deep, and a nudge of a few points is
+            // enough to clear the disc.
+            var pt = pt
+            var rect = CGRect.zero
+            var clears = false
+            // The block may overhang its arc's outer edge by up to a quarter of
+            // its height; the visible disc is a few points smaller than the
+            // layout radius, so the disc test uses the unpadded block.
+            let maxShift = max(0, cell.outerRadius - r - blockH / 4)
+            for shift in stride(from: CGFloat(0), through: maxShift, by: 2) {
+                pt = CGPoint(x: center.x + (r + shift) * cos(cell.midAngle), y: center.y + (r + shift) * sin(cell.midAngle))
+                let block = CGRect(x: pt.x - blockW / 2, y: pt.y - blockH / 2, width: blockW, height: blockH)
+                rect = block.insetBy(dx: -3, dy: -2)
+                if clearsCenterDisc(block, center: center) { clears = true; break }
+            }
+            if !clears { maxW -= 12; continue }
+            guard !placedLabels.contains(where: { $0.intersects(rect) }) else { return }
+            placedLabels.append(rect)
 
             var y = pt.y - blockH / 2 + ns.height / 2
             ctx.draw(nameText, at: CGPoint(x: pt.x, y: y), anchor: .center)
-            y += ns.height / 2 + gap + ss.height / 2
-            if ss.width <= maxW {
+            if twoLine {
+                y += ns.height / 2 + gap + ss.height / 2
                 ctx.draw(sizeText, at: CGPoint(x: pt.x, y: y), anchor: .center)
             }
-            if let countText, cs.width <= maxW {
-                y += ss.height / 2 + gap + cs.height / 2
+            if let countText {
+                y += (twoLine ? ss.height : ns.height) / 2 + gap + cs.height / 2
                 ctx.draw(countText, at: CGPoint(x: pt.x, y: y), anchor: .center)
             }
-        } else {
-            let nameText = ctx.resolve(
-                Text(cell.node.name)
-                    .font(.system(size: 9.5, weight: .medium))
-                    .foregroundColor(.white)
-            )
-            let ns = nameText.measure(in: CGSize(width: maxW, height: 20))
-            guard ns.width <= maxW else { return }
-            ctx.draw(nameText, at: pt, anchor: .center)
+            return
         }
+    }
+
+    private static let unbounded = CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+
+    // The center disc is drawn above the canvas by TreemapView, so a label
+    // must not run underneath it: true when the disc stays out of `rect`.
+    private static func clearsCenterDisc(_ rect: CGRect, center: CGPoint) -> Bool {
+        let nearest = CGPoint(x: min(max(center.x, rect.minX), rect.maxX),
+                              y: min(max(center.y, rect.minY), rect.maxY))
+        return hypot(nearest.x - center.x, nearest.y - center.y) >= TreemapLayout.centerRadius
+    }
+
+    // Resolves `name` so that it fits in `maxW`, middle-truncating with an
+    // ellipsis when it doesn't. Measuring inside a bounded width used to
+    // report a size that fit while `draw` then painted the full natural width,
+    // so long names spilled over neighbouring arcs. A label that would keep
+    // fewer than 7 characters, or under 30% of the name, says nothing useful
+    // ("Fr…ks"), so nil is returned and no label is drawn; the hover tooltip
+    // still shows the full name.
+    private static func fittedName(_ name: String, size: CGFloat, weight: Font.Weight, maxW: CGFloat, ctx: GraphicsContext) -> (GraphicsContext.ResolvedText, CGSize)? {
+        func resolve(_ s: String) -> (GraphicsContext.ResolvedText, CGSize) {
+            let t = ctx.resolve(Text(s).font(.system(size: size, weight: weight)).foregroundColor(.white))
+            return (t, t.measure(in: unbounded))
+        }
+        var (text, measured) = resolve(name)
+        if measured.width <= maxW { return (text, measured) }
+        let chars = Array(name)
+        let minKeep = max(7, Int(Double(chars.count) * 0.3))
+        // Proportional first guess, then shrink until it fits.
+        var keep = max(2, Int(Double(chars.count) * Double(maxW / measured.width)) - 1)
+        while keep >= minKeep {
+            let candidate = String(chars.prefix((keep + 1) / 2)) + "…" + String(chars.suffix(keep / 2))
+            (text, measured) = resolve(candidate)
+            if measured.width <= maxW { return (text, measured) }
+            keep -= 2
+        }
+        return nil
     }
 
     // MARK: - Hit testing
