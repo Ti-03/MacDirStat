@@ -11,7 +11,14 @@ struct ContentView: View {
     @State private var showingSettings = false
     @AppStorage("defaultTab") private var defaultTab = "treemap"
     @AppStorage("treemapColorScheme") private var treemapColorScheme = "byType"
+    @AppStorage("useBinarySize") private var useBinarySize = false
     @Namespace private var tabNamespace
+
+    // `errorMessage` is the one channel every failure (scan, save, open,
+    // compare, export, trash) reports through; this is the one place it is shown.
+    private var errorAlertShown: Binding<Bool> {
+        Binding(get: { vm.errorMessage != nil }, set: { if !$0 { vm.errorMessage = nil } })
+    }
 
     private var showTree: Bool { userWantsTree && !scanHidesTree }
 
@@ -63,10 +70,13 @@ struct ContentView: View {
                     }
                 }
 
-                if vm.isScanning || vm.isComputingLayout {
+                if vm.isScanning || vm.isComputingLayout || vm.isComputingComparison {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
-                        if vm.isScanning {
+                        if vm.isComputingComparison {
+                            Text("Comparing…")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else if vm.isScanning {
                             Text("\(vm.itemsScanned) items")
                                 .font(.caption).foregroundStyle(.secondary).monospacedDigit()
                             Text(ByteFormatter.string(from: vm.bytesFound))
@@ -107,6 +117,12 @@ struct ContentView: View {
             if scanning { activeTab = .treemap }
         }
         .onChange(of: treemapColorScheme) { _ in vm.refreshLayout() }
+        .onChange(of: useBinarySize) { _ in vm.refreshLayout() }
+        .alert("Something Went Wrong", isPresented: errorAlertShown) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(vm.errorMessage ?? "")
+        }
         .onAppear {
             if defaultTab == "duplicates" { activeTab = .duplicates }
         }

@@ -994,7 +994,9 @@ public final class ScanViewModel: ObservableObject {
     }
 
     public func drillDown(into node: FileNode) {
-        guard node.isDirectory else { return }
+        // Auto-summarized folders have no materialized children: drilling in
+        // would show an empty chart with no way back, so select instead.
+        guard node.isDrillable else { select(node); return }
         drillStack.append(node)
         Task { await recomputeLayout() }
     }
@@ -1014,9 +1016,18 @@ public final class ScanViewModel: ObservableObject {
     }
 
     public func refreshLayout() {
-        guard let root else { return }
-        colorMap = ExtensionColorMap(root: root)
+        guard let root, let currentTree = tree else { return }
+        let map = ExtensionColorMap(root: root)
+        colorMap = map
         Task { await recomputeLayout() }
+        // The legend bakes each extension's color in, so a color-scheme change
+        // must rebuild it too, not just the chart.
+        extensionTask?.cancel()
+        extensionTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let summaries = Self.buildExtensionSummaries(tree: currentTree, map: map)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self?.extensionSummaries = summaries }
+        }
     }
 
     // MARK: - Move to Trash (prune-in-place, no rescan)
@@ -1045,15 +1056,22 @@ public final class ScanViewModel: ObservableObject {
 
         var trashedIndices: [Int] = []
         trashedIndices.reserveCapacity(nodes.count)
-        for node in nodes where ObjectIdentifier(node.tree) == ObjectIdentifier(currentTree) {
+        var failures: [String] = []
+        for node in nodes where ObjectIdentifier(node.tree) == ObjectIdentifier(currentTree) && !node.isSynthetic {
             do {
                 try FileManager.default.trashItem(at: node.url, resultingItemURL: nil)
                 trashedIndices.append(node.index)
             } catch {
-                // Swallow, same as the old per-call-site `try?` behavior —
-                // one failed delete (e.g. permissions) shouldn't block the
-                // rest of the batch or surface a blocking alert.
+                // One failed delete (e.g. permissions) shouldn't block the rest
+                // of the batch, but the user has to hear about it: the item
+                // stays in the tree, so a silent failure looks like a no-op.
+                failures.append("\(node.name): \(error.localizedDescription)")
             }
+        }
+        if !failures.isEmpty {
+            let shown = failures.prefix(3).joined(separator: "\n")
+            let more = failures.count > 3 ? "\n…and \(failures.count - 3) more" : ""
+            errorMessage = "Couldn't move to Trash:\n\(shown)\(more)"
         }
         guard !trashedIndices.isEmpty else { return false }
 
@@ -1167,7 +1185,7 @@ public final class ScanViewModel: ObservableObject {
 
     private nonisolated static func buildExtensionSummaries(tree: FileTree, map: ExtensionColorMap) -> [ExtensionSummary] {
         var groups: [String: (count: Int, size: Int64)] = [:]
-        for record in tree.records where !record.isDirectory {
+        for record in tree.records where !record.isDirectory && !record.isSynthetic {
             groups[record.fileExtension, default: (0, 0)].count += 1
             groups[record.fileExtension, default: (0, 0)].size  += record.size
         }
@@ -1175,7 +1193,7 @@ public final class ScanViewModel: ObservableObject {
         return groups.map { ext, stats in
             ExtensionSummary(
                 id: ext,
-                ext: ext.isEmpty ? "(directory)" : ".\(ext)",
+                ext: ext.isEmpty ? "(no extension)" : ".\(ext)",
                 color: map.color(for: ext),
                 fileCount: stats.count,
                 totalSize: stats.size,

@@ -49,22 +49,6 @@ struct SidebarView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-
-            if vm.duplicatesReady {
-                Section {
-                    NavigationLink {
-                        DuplicatesView()
-                    } label: {
-                        Label("Duplicates", systemImage: "doc.on.doc")
-                            .foregroundStyle(.orange)
-                    }
-                } header: {
-                    Label("Analysis", systemImage: "magnifyingglass")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)

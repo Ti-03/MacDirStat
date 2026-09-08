@@ -72,6 +72,7 @@ struct MacDirStatApp: App {
                     NotificationCenter.default.post(name: .exportCSV, object: nil)
                 }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
+                .disabled(vm.tree == nil)
 
                 Button("Compare With Saved Scan…") {
                     compareWithSavedScanPicker(vm: vm)

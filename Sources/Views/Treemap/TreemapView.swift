@@ -87,18 +87,26 @@ struct TreemapView: View {
                 .padding(20)
                 .glassCard(cornerRadius: 16)
                 .allowsHitTesting(false)
-            } else if let root = vm.treemapRoot, !vm.cells.isEmpty {
+            } else if let root = vm.treemapRoot {
+                // Always shown once a chart root exists, so the Back control
+                // never disappears just because no arc was large enough to draw.
                 centerLabel(for: root)
                     .allowsHitTesting(false)
             }
 
             // ── Empty folder ─────────────────────────────────────────────────
-            if vm.cells.isEmpty, !vm.isScanning, !vm.isComputingLayout, vm.root != nil {
+            // Keyed off the node, not off `cells`: an empty cell list can also
+            // mean the view is too small to draw anything.
+            if let root = vm.treemapRoot, !vm.isScanning, !vm.isComputingLayout,
+               !root.children.contains(where: { $0.size > 0 }) {
                 CompatContentUnavailableView(
-                    title: "Empty Folder",
+                    title: root.isAutoSummarized ? "Summarized Folder" : "Empty Folder",
                     systemImage: "folder",
-                    description: Text("This folder contains no files")
+                    description: Text(root.isAutoSummarized
+                                      ? "\(root.itemCountLabel). Contents aren't browsable individually."
+                                      : "This folder contains no files")
                 )
+                .allowsHitTesting(false)
             }
 
             // ── Live indicator ───────────────────────────────────────────────
@@ -138,7 +146,7 @@ struct TreemapView: View {
         guard c.x > 0 else { return }
 
         if TreemapRenderer.isInCenter(point: loc, center: c) {
-            guard !vm.drillStack.isEmpty else { return }
+            guard !vm.drillStack.isEmpty else { vm.select(nil); return }
             HapticEngine.shared.drillOut()
             drillingIn = false
             clickAnchor = .center
@@ -146,8 +154,9 @@ struct TreemapView: View {
             vm.drillUp()
             return
         }
-        guard let cell = TreemapRenderer.cell(at: loc, center: c, in: vm.cells) else { return }
-        if cell.node.isDirectory {
+        // Clicking empty canvas clears the selection (and pauses the pulse timer).
+        guard let cell = TreemapRenderer.cell(at: loc, center: c, in: vm.cells) else { vm.select(nil); return }
+        if cell.node.isDrillable {
             HapticEngine.shared.drillIn()
             drillingIn = true
             let w = viewSize.width > 0 ? viewSize.width : 1
@@ -179,16 +188,19 @@ struct TreemapView: View {
 
             Divider()
 
-            Button {
-                NSWorkspace.shared.activateFileViewerSelecting([node.url])
-            } label: {
-                Label("Reveal in Finder", systemImage: "folder.viewfinder")
-            }
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(node.url.path, forType: .string)
-            } label: {
-                Label("Copy Path", systemImage: "doc.on.clipboard")
+            // The synthetic "Hidden & Unreadable Space" node has no path on disk.
+            if !node.isSynthetic {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([node.url])
+                } label: {
+                    Label("Reveal in Finder", systemImage: "folder.viewfinder")
+                }
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(node.url.path, forType: .string)
+                } label: {
+                    Label("Copy Path", systemImage: "doc.on.clipboard")
+                }
             }
             Button {
                 NSPasteboard.general.clearContents()
@@ -197,7 +209,7 @@ struct TreemapView: View {
                 Label("Copy Name", systemImage: "textformat")
             }
 
-            if node.isDirectory {
+            if node.isDrillable {
                 Divider()
                 Button {
                     HapticEngine.shared.drillIn()
@@ -210,7 +222,7 @@ struct TreemapView: View {
                 }
             }
 
-            if !vm.isReadOnlySnapshot {
+            if !vm.isReadOnlySnapshot, !node.isSynthetic {
                 Divider()
 
                 Button(role: .destructive) {
@@ -329,7 +341,7 @@ private struct HoverTooltip: View {
                     Label(ByteFormatter.string(from: node.size), systemImage: "internaldrive")
                         .monospacedDigit()
                     if node.isDirectory {
-                        Label("\(node.children.count) items", systemImage: "folder")
+                        Label(node.itemCountLabel, systemImage: "folder")
                     } else if !node.fileExtension.isEmpty {
                         Text(".\(node.fileExtension.uppercased())")
                             .padding(.horizontal, 4)
