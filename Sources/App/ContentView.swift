@@ -220,8 +220,12 @@ struct ContentView: View {
             }
             // The banner's whole call to action is Full Disk Access, which a
             // sandboxed App Store build can't use. Blocked folders there are a
-            // fact of the sandbox, not something the user can fix.
-            if !Build.isAppStore, !vm.hasFullDiskAccess || (vm.deniedCount > 0 && !vm.isScanning) {
+            // fact of the sandbox, not something the user can fix. Likewise,
+            // once the grant is held, whatever is still denied is root-only
+            // (/private/var/db, …) and no setting will open it, so telling the
+            // user to grant access again is wrong (issue #24). Denied folders
+            // keep their lock icon and the count shows in Settings.
+            if !Build.isAppStore, !vm.hasFullDiskAccess {
                 FullDiskAccessBanner(hasFullDiskAccess: vm.hasFullDiskAccess, deniedCount: vm.deniedCount) {
                     vm.showFDASheet = true
                 }
@@ -552,7 +556,7 @@ private struct DashboardSettingsView: View {
                 settingsSection("Files") {
                     Toggle("Show hidden files", isOn: $showHiddenFiles)
                         .toggleStyle(.switch).controlSize(.small)
-                    caption("Include dot-files like .DS_Store and .git in scans.")
+                    caption("Include dot-files and dot-folders (.git, .cache, .Trash, …). Turning this off makes totals smaller than Finder reports.")
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Excluded folders")

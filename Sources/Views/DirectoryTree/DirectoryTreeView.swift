@@ -57,13 +57,14 @@ struct DirectoryTreeView: View {
                 .scrollContentBackground(.hidden)
                 .background(.ultraThinMaterial)
             } else {
-                ScanningPlaceholder(items: vm.itemsScanned, bytes: vm.bytesFound)
+                ScanningPlaceholder(title: vm.isScanning ? "Scanning…" : "Preparing…", items: vm.itemsScanned, bytes: vm.bytesFound)
             }
         }
     }
 }
 
 private struct ScanningPlaceholder: View {
+    let title: String
     let items: Int
     let bytes: Int64
 
@@ -71,7 +72,7 @@ private struct ScanningPlaceholder: View {
         VStack(spacing: 16) {
             ProgressView().scaleEffect(1.3)
             VStack(spacing: 4) {
-                Text("Scanning…").font(.headline)
+                Text(title).font(.headline)
                 Text("\(items) items · \(ByteFormatter.string(from: bytes))")
                     .font(.subheadline).foregroundStyle(.secondary)
                     .monospacedDigit()

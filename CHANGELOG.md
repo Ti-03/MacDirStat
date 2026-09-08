@@ -45,7 +45,19 @@ list of user-visible bugs found in an end-to-end audit are fixed.
   being the Preboot and Recovery volumes plus purgeable snapshot space that
   no file scanner can show. That remainder is reported as one synthetic
   row, renamed from "Hidden & Unreadable Space" to "System & Unreadable
-  Space" now that hidden files are actually scanned.
+  Space" now that hidden files are actually scanned. Verified in the
+  installed app: 881.2 GB shown for a volume Finder reports at 880 GB used.
+- Existing installs also had 1.3's "hide hidden files" default persisted in
+  their preferences; the one-time migration now resets that too (a toggle
+  set afterwards is respected), which was worth another 260 GB on a real
+  home folder (~/.cache, ~/.ollama, .git, .Trash and friends).
+- The "Full Disk Access required" banner no longer appears once the grant
+  is held: whatever is still denied then is root-only and no setting can
+  open it (issue #24). Locked folders keep their icon; Settings shows the
+  count.
+- The file list said "Scanning…" for minutes after a large scan had
+  finished while safety tags were computed; tagging is now an incremental
+  path walk (no per-node URL) and the panel says "Preparing…" meanwhile.
 - Live refresh re-hashed the entire tree for duplicates on every change
   batch; it now hashes only the size buckets the changed folder touches,
   and duplicate results are written on the main thread instead of racing

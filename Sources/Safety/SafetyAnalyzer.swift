@@ -28,7 +28,7 @@ public struct SafetyAnalyzer {
         level(path: node.url.path, name: node.name, isSynthetic: node.isSynthetic)
     }
 
-    private static func level(path: String, name: String, isSynthetic: Bool) -> SafetyLevel {
+    static func level(path: String, name: String, isSynthetic: Bool) -> SafetyLevel {
         // Synthetic nodes (e.g. the hidden-space reconciliation entry) don't point
         // at a real, deletable file — always treat them as the most protective
         // level so nothing ever attempts to trash/move them.

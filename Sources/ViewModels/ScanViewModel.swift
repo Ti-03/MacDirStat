@@ -101,17 +101,26 @@ public final class ScanViewModel: ObservableObject {
     // MARK: - Legacy defaults migration
 
     /// Releases up to 1.3 shipped `.git,node_modules,DerivedData,.Trash` as the
-    /// factory exclusion list and persisted it into the preferences file, so a
-    /// new factory default alone never reaches existing installs. Resets that
-    /// exact legacy value once; a user who has customised the list, or who
-    /// re-enters the legacy list after the migration ran, is left alone.
+    /// factory exclusion list and "hide hidden files", and persisted both into
+    /// the preferences file, so a new factory default alone never reaches
+    /// existing installs. Each step runs once: it resets exactly the legacy
+    /// value (a customised exclusion list is left alone) and, for hidden files,
+    /// the legacy `false`, since with 1.3's defaults that value is
+    /// indistinguishable from "never touched". A user who wants dot-files
+    /// hidden again flips the toggle once more.
     nonisolated static func migrateLegacyExclusionDefault(in defaults: UserDefaults) {
-        let flag = "legacyExclusionDefaultMigrated"
-        guard !defaults.bool(forKey: flag) else { return }
-        defaults.set(true, forKey: flag)
-        if defaults.string(forKey: "excludedFolderNames") == ".git,node_modules,DerivedData,.Trash" {
+        let versionKey = "legacyDefaultsMigration"
+        // Step 1 shipped under a Bool flag before this became versioned.
+        var done = defaults.integer(forKey: versionKey)
+        if done == 0, defaults.bool(forKey: "legacyExclusionDefaultMigrated") { done = 1 }
+
+        if done < 1, defaults.string(forKey: "excludedFolderNames") == ".git,node_modules,DerivedData,.Trash" {
             defaults.removeObject(forKey: "excludedFolderNames")
         }
+        if done < 2, defaults.object(forKey: "showHiddenFiles") != nil, !defaults.bool(forKey: "showHiddenFiles") {
+            defaults.removeObject(forKey: "showHiddenFiles")
+        }
+        defaults.set(2, forKey: versionKey)
     }
 
     // MARK: - Last scanned folder
@@ -1310,13 +1319,23 @@ public final class ScanViewModel: ObservableObject {
         self.isComputingLayout = false
     }
 
-    // Flat loop over every index — order doesn't matter (each node's safety
-    // level only depends on its own reconstructed path/name, both already
-    // fully populated by the builder before this runs).
+    // Iterative DFS building each node's absolute path from its parent's, so
+    // tagging a multi-million-node tree costs one string append per node
+    // instead of a parent-chain walk plus a URL allocation per node (that
+    // version kept a full-disk scan on "Scanning…" for two extra minutes
+    // after the walk itself had finished).
     private nonisolated static func tagSafetyLevels(tree: FileTree) {
-        for index in 0..<tree.records.count {
-            let node = FileNode(tree: tree, index: index)
-            tree.setSafety(SafetyAnalyzer.level(for: node), at: index)
+        var stack: [(index: Int, path: String)] = [(tree.rootIndex, tree.rootPath)]
+        while let (index, path) = stack.popLast() {
+            let record = tree.records[index]
+            tree.setSafety(SafetyAnalyzer.level(path: path, name: record.name, isSynthetic: record.isSynthetic), at: index)
+            let start = tree.childStart[index]
+            let count = tree.childCount[index]
+            for offset in 0..<count {
+                let child = tree.childIndices[start + offset]
+                let childPath = path.hasSuffix("/") ? path + tree.records[child].name : path + "/" + tree.records[child].name
+                stack.append((child, childPath))
+            }
         }
     }
 

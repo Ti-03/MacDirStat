@@ -115,6 +115,25 @@ final class DefaultScanCoverageTests: XCTestCase {
         XCTAssertEqual(custom.string(forKey: "excludedFolderNames"), "Library,Movies", "user customisation is preserved")
     }
 
+    // 1.3 also persisted its "hide hidden files" default. An install that
+    // already ran the first (exclusion-only) migration must still get this
+    // one, exactly once.
+    func test_legacy_hidden_files_false_is_reset_once_even_after_first_migration() {
+        let suite = "mds-migration-hidden-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        defaults.set(true, forKey: "legacyExclusionDefaultMigrated")   // step 1 already ran
+        defaults.set(false, forKey: "showHiddenFiles")
+        ScanViewModel.migrateLegacyExclusionDefault(in: defaults)
+        XCTAssertNil(defaults.object(forKey: "showHiddenFiles"), "legacy hidden=false is reset")
+        XCTAssertEqual(defaults.integer(forKey: "legacyDefaultsMigration"), 2)
+
+        defaults.set(false, forKey: "showHiddenFiles")
+        ScanViewModel.migrateLegacyExclusionDefault(in: defaults)
+        XCTAssertEqual(defaults.object(forKey: "showHiddenFiles") as? Bool, false, "a deliberate later choice is kept")
+    }
+
     func test_shared_defaults_are_used_everywhere() {
         XCTAssertEqual(ScanDefaults.excludedFolderNames, "")
         XCTAssertTrue(ScanDefaults.showHiddenFiles)
