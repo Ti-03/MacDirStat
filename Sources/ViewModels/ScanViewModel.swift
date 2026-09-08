@@ -162,9 +162,23 @@ public final class ScanViewModel: ObservableObject {
             hasFullDiskAccess = true
             return
         }
-        // TCC.db is only readable when Full Disk Access is granted
-        let probe = "/Library/Application Support/com.apple.TCC/TCC.db"
-        hasFullDiskAccess = FileManager.default.isReadableFile(atPath: probe)
+        hasFullDiskAccess = Self.probeFullDiskAccess()
+    }
+
+    /// Ground truth is whether a TCC-protected file actually opens, because that
+    /// is exactly what the scanner will hit. `access(2)` (isReadableFile) is not
+    /// the same check the sandbox applies to `open(2)`, and either TCC database
+    /// alone can be missing or unreadable for reasons unrelated to the grant.
+    nonisolated static func probeFullDiskAccess() -> Bool {
+        let probes = [
+            "/Library/Application Support/com.apple.TCC/TCC.db",
+            NSHomeDirectory() + "/Library/Application Support/com.apple.TCC/TCC.db",
+        ]
+        for path in probes {
+            let fd = open(path, O_RDONLY | O_CLOEXEC)
+            if fd >= 0 { close(fd); return true }
+        }
+        return false
     }
 
     /// Public wrapper so the onboarding sheet can poll for a live permission change
@@ -935,9 +949,15 @@ public final class ScanViewModel: ObservableObject {
               volumeURL.standardizedFileURL.path == scannedURL.standardizedFileURL.path
         else { return nil }
 
-        guard let volumeValues = try? scannedURL.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey]),
+        // "Important usage" availability is the figure Finder and Storage
+        // settings show: it treats purgeable space (local Time Machine
+        // snapshots, caches the system will evict) as free. Using the plain
+        // available figure instead reported all of that purgeable space as
+        // "unreadable", which on a typical Mac is tens of GB that no
+        // permission grant could ever make visible (issue #24).
+        guard let volumeValues = try? scannedURL.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]),
               let totalCapacity = volumeValues.volumeTotalCapacity,
-              let availableCapacity = volumeValues.volumeAvailableCapacity
+              let availableCapacity = volumeValues.volumeAvailableCapacityForImportantUsage ?? volumeValues.volumeAvailableCapacity.map(Int64.init)
         else { return nil }
 
         guard let hidden = hiddenSpaceBytes(

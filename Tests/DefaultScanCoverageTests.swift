@@ -80,6 +80,21 @@ final class DefaultScanCoverageTests: XCTestCase {
         XCTAssertTrue(git.isAutoSummarized)
     }
 
+    func test_symlinked_root_scans_its_target() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("mds-symroot-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let real = base.appendingPathComponent("real")
+        try write(50_000, at: real.appendingPathComponent("a.bin"))
+        let link = base.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+
+        let scanned = await scanTree(at: link)
+        let root = try XCTUnwrap(scanned)
+        XCTAssertEqual(root.size, allocated(real.appendingPathComponent("a.bin")))
+        XCTAssertEqual(root.children.map(\.name), ["a.bin"])
+        XCTAssertEqual(root.tree.rootPath, FileScanner.resolvingSymlinkRoot(link).path)
+    }
+
     func test_legacy_exclusion_default_is_reset_once() {
         let suite = "mds-migration-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

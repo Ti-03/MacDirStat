@@ -121,6 +121,10 @@ public actor FileScanner {
     public func scan(url: URL) -> AsyncStream<ScanProgress> {
         activeTask?.cancel()
         let (stream, continuation) = AsyncStream<ScanProgress>.makeStream()
+        // A symlinked root (a Finder alias folder, /tmp, /var, ...) is scanned
+        // as the directory it points to. Every subdirectory keeps the
+        // no-follow rule; only the root the user explicitly chose is resolved.
+        let url = Self.resolvingSymlinkRoot(url)
 
         activeTask = Task {
             let counter = ProgressCounter()
@@ -150,6 +154,19 @@ public actor FileScanner {
         }
 
         return stream
+    }
+}
+
+extension FileScanner {
+    // realpath(3) rather than URL.resolvingSymlinksInPath(), which also strips
+    // the /private prefix and would hand back a path that differs from what
+    // FSEvents later reports for the same directory.
+    nonisolated static func resolvingSymlinkRoot(_ url: URL) -> URL {
+        var st = stat()
+        guard lstat(url.path, &st) == 0, st.st_mode & S_IFMT == S_IFLNK else { return url }
+        guard let resolved = realpath(url.path, nil) else { return url }
+        defer { free(resolved) }
+        return URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
     }
 }
 
