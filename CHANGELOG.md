@@ -40,6 +40,21 @@ list of user-visible bugs found in an end-to-end audit are fixed.
   duplicates…" spinning until the next rescan.
 - Symlinked scan roots (`/tmp`, alias folders) failed with a raw error
   instead of scanning their target.
+- A full scan of the boot volume now accounts for every readable byte:
+  854.9 GB of 8.5 million items on a 907 GB container, with the remainder
+  being the Preboot and Recovery volumes plus purgeable snapshot space that
+  no file scanner can show. That remainder is reported as one synthetic
+  row, renamed from "Hidden & Unreadable Space" to "System & Unreadable
+  Space" now that hidden files are actually scanned.
+- Live refresh re-hashed the entire tree for duplicates on every change
+  batch; it now hashes only the size buckets the changed folder touches,
+  and duplicate results are written on the main thread instead of racing
+  the views.
+- Move to Trash runs off the main thread, so "Delete All Duplicates" over
+  thousands of files no longer freezes the window.
+- Comparing two scans no longer lists every file under a folder as
+  "removed" when that folder became a collapsed summary between the two
+  scans; it reports the folder's own growth instead.
 - Chart labels no longer print on top of each other or spill past their
   arc ("PlugInsMediaProvMotionEffect.fxp"); long names are middle-truncated
   to fit, labels that would be meaningless are dropped, and inner-ring

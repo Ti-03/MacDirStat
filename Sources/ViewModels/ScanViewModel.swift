@@ -339,18 +339,7 @@ public final class ScanViewModel: ObservableObject {
                         await MainActor.run { vm?.extensionSummaries = summaries }
                     }
                     // Duplicate detection: lower priority, also off main actor
-                    self.duplicateTask = Task.detached(priority: .utility) { [finalTree, weak self] in
-                        let detector = DuplicateDetector()
-                        await detector.detect(in: finalTree)
-                        guard !Task.isCancelled else { return }
-                        let groups = Self.buildDuplicateGroups(tree: finalTree)
-                        guard !Task.isCancelled else { return }
-                        let vm = self
-                        await MainActor.run {
-                            vm?.duplicatesReady = true
-                            vm?.duplicateGroups = groups
-                        }
-                    }
+                    self.runDuplicateDetection(on: finalTree)
                 case .failed(let msg):
                     self.errorMessage = msg
                     self.isScanning = false
@@ -478,7 +467,7 @@ public final class ScanViewModel: ObservableObject {
         if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
             FileHandle.standardError.write("REFRESH spliced changedPaths=\(paths.count) root=\(scanURL.path)\n".data(using: .utf8)!)
         }
-        await applySplicedTree(workingTree, from: startingTree)
+        await applySplicedTree(workingTree, from: startingTree, changedPaths: paths)
     }
 
     // Rescans exactly the on-disk directory at `changedPath` (a full,
@@ -682,7 +671,7 @@ public final class ScanViewModel: ObservableObject {
     // anything else touches `newTree.records`: it and `DuplicateDetector`
     // both mutate that array in place, so — same reasoning as `scan(url:)` —
     // they can't be allowed to run concurrently with each other.
-    private func applySplicedTree(_ newTree: FileTree, from oldTree: FileTree) async {
+    private func applySplicedTree(_ newTree: FileTree, from oldTree: FileTree, changedPaths: [String]) async {
         let selectedPath = selectedNode.map { oldTree.path(of: $0.index) }
         let drillPaths = drillStack.map { oldTree.path(of: $0.index) }
 
@@ -719,21 +708,47 @@ public final class ScanViewModel: ObservableObject {
             await MainActor.run { self?.extensionSummaries = summaries }
         }
 
+        // Only the rescanned subtrees are new; hash just the size buckets
+        // they touch instead of the whole tree on every FSEvents batch. If
+        // detection had not finished yet there is nothing to build on, so
+        // run it in full.
+        var focus: Set<Int>? = nil
+        if duplicatesReady {
+            var indices = Set<Int>()
+            for path in changedPaths {
+                let normalized = (path.hasSuffix("/") && path != "/") ? String(path.dropLast()) : path
+                if let start = Self.findIndex(forPath: normalized, in: newTree) {
+                    var stack = [start]
+                    while let i = stack.popLast() {
+                        indices.insert(i)
+                        let s = newTree.childStart[i], c = newTree.childCount[i]
+                        for offset in 0..<c { stack.append(newTree.childIndices[s + offset]) }
+                    }
+                }
+            }
+            focus = indices
+        }
+        runDuplicateDetection(on: newTree, focusing: focus)
+
+        isComputingLayout = true
+        await recomputeLayout()
+    }
+
+    // Detects off the main actor, applies the result on it (so no view ever
+    // reads a record mid-write), then regroups. Cancels any run in flight.
+    private func runDuplicateDetection(on tree: FileTree, focusing focus: Set<Int>? = nil) {
         duplicateTask?.cancel()
         duplicateTask = Task.detached(priority: .utility) { [weak self] in
-            let detector = DuplicateDetector()
-            await detector.detect(in: newTree)
+            guard let assignments = await DuplicateDetector().detect(in: tree, focusing: focus) else { return }
             guard !Task.isCancelled else { return }
-            let groups = Self.buildDuplicateGroups(tree: newTree)
+            await MainActor.run { tree.applyDuplicateGroups(assignments) }
+            let groups = Self.buildDuplicateGroups(tree: tree)
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 self?.duplicatesReady = true
                 self?.duplicateGroups = groups
             }
         }
-
-        isComputingLayout = true
-        await recomputeLayout()
     }
 
     // Walk the tree by path components to find the FSNode for a given path.
@@ -964,6 +979,12 @@ public final class ScanViewModel: ObservableObject {
         return hidden >= oneGB ? hidden : nil
     }
 
+    // What the gap on a volume scan actually is: other volumes in the same
+    // APFS container (Preboot, Recovery, VM), snapshot and purgeable space,
+    // filesystem metadata, and anything the process was denied. None of it
+    // is hidden files, which are scanned.
+    static let syntheticSpaceNodeName = "System & Unreadable Space"
+
     // When the scanned URL is itself a volume's mount point, returns a NEW
     // tree with a synthetic "Hidden & Unreadable Space" child representing
     // the portion of the volume's used space the scanner could never
@@ -993,7 +1014,7 @@ public final class ScanViewModel: ObservableObject {
             scannedTotal: tree.records[tree.rootIndex].size
         ) else { return nil }
 
-        return tree.appendingSyntheticRootChild(name: "Hidden & Unreadable Space", size: hidden)
+        return tree.appendingSyntheticRootChild(name: Self.syntheticSpaceNodeName, size: hidden)
     }
 
     // Walk up the parent chain recalculating folder sizes from their children.
@@ -1077,13 +1098,16 @@ public final class ScanViewModel: ObservableObject {
     // the wrong (current, possibly since-changed) file or silently no-op,
     // neither of which is acceptable, so this is a hard no-op while a
     // snapshot is loaded.
+    // Returns whether a trash operation was started (false for a read-only
+    // snapshot, an empty batch, or nodes that no longer resolve). The moves
+    // themselves run off the main actor: "Delete All Duplicates" over
+    // thousands of files used to freeze the UI for the whole loop. The tree
+    // is pruned when they finish.
     @discardableResult
     public func trashNodes(_ nodes: [FileNode]) -> Bool {
         guard !isReadOnlySnapshot, let currentTree = tree, !nodes.isEmpty else { return false }
 
-        var trashedIndices: [Int] = []
-        trashedIndices.reserveCapacity(nodes.count)
-        var failures: [String] = []
+        var targets: [(index: Int, path: String, name: String)] = []
         for node in nodes where !node.isSynthetic {
             // Duplicate groups and list rows can outlive a live-refresh splice
             // and still point at the previous tree instance; resolve them by
@@ -1096,24 +1120,41 @@ public final class ScanViewModel: ObservableObject {
             } else {
                 continue
             }
-            do {
-                try FileManager.default.trashItem(at: URL(fileURLWithPath: currentTree.path(of: index)), resultingItemURL: nil)
-                trashedIndices.append(index)
-            } catch {
-                // One failed delete (e.g. permissions) shouldn't block the rest
-                // of the batch, but the user has to hear about it: the item
-                // stays in the tree, so a silent failure looks like a no-op.
-                failures.append("\(node.name): \(error.localizedDescription)")
-            }
+            targets.append((index, currentTree.path(of: index), node.name))
         }
-        if !failures.isEmpty {
-            let shown = failures.prefix(3).joined(separator: "\n")
-            let more = failures.count > 3 ? "\n…and \(failures.count - 3) more" : ""
-            errorMessage = "Couldn't move to Trash:\n\(shown)\(more)"
-        }
-        guard !trashedIndices.isEmpty else { return false }
+        guard !targets.isEmpty else { return false }
 
-        pruneTree(afterTrashing: trashedIndices, from: currentTree)
+        Task { [weak self] in
+            let (trashed, failures) = await Task.detached(priority: .userInitiated) { () -> ([Int], [String]) in
+                var trashed: [Int] = []
+                var failures: [String] = []
+                for target in targets {
+                    do {
+                        try FileManager.default.trashItem(at: URL(fileURLWithPath: target.path), resultingItemURL: nil)
+                        trashed.append(target.index)
+                    } catch {
+                        // One failed delete (e.g. permissions) shouldn't block
+                        // the rest of the batch, but the user has to hear about
+                        // it: the item stays in the tree, so a silent failure
+                        // looks like a no-op.
+                        failures.append("\(target.name): \(error.localizedDescription)")
+                    }
+                }
+                return (trashed, failures)
+            }.value
+            guard let self else { return }
+            if !failures.isEmpty {
+                let shown = failures.prefix(3).joined(separator: "\n")
+                let more = failures.count > 3 ? "\n…and \(failures.count - 3) more" : ""
+                self.errorMessage = "Couldn't move to Trash:\n\(shown)\(more)"
+            }
+            guard !trashed.isEmpty else { return }
+            // The tree was replaced (splice, rescan) while the moves ran: the
+            // indices no longer apply. The files are gone from disk, so mark
+            // the display stale rather than prune the wrong nodes.
+            guard self.tree === currentTree else { self.hasStaleResults = true; return }
+            self.pruneTree(afterTrashing: trashed, from: currentTree)
+        }
         return true
     }
 
@@ -1166,17 +1207,15 @@ public final class ScanViewModel: ObservableObject {
         // If detection was still running when the user trashed something,
         // cancelling it above would otherwise leave "Scanning for duplicates…"
         // spinning until the next full rescan, so finish detecting first.
-        let needsDetection = !duplicatesReady
-        duplicateTask?.cancel()
-        duplicateTask = Task.detached(priority: .utility) { [weak self] in
-            if needsDetection { await DuplicateDetector().detect(in: newTree) }
-            guard !Task.isCancelled else { return }
-            let groups = Self.buildDuplicateGroups(tree: newTree)
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                self?.duplicatesReady = true
-                self?.duplicateGroups = groups
+        if duplicatesReady {
+            duplicateTask?.cancel()
+            duplicateTask = Task.detached(priority: .utility) { [weak self] in
+                let groups = Self.buildDuplicateGroups(tree: newTree)
+                guard !Task.isCancelled else { return }
+                await MainActor.run { self?.duplicateGroups = groups }
             }
+        } else {
+            runDuplicateDetection(on: newTree)
         }
 
         Task { await recomputeLayout() }

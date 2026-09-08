@@ -34,7 +34,7 @@ final class DuplicateDetectorTests: XCTestCase {
         let tree = FileTreeBuilder.build(from: root, rootPath: tmp.path)
 
         let detector = DuplicateDetector()
-        await detector.detect(in: tree)
+        if let groups = await detector.detect(in: tree) { tree.applyDuplicateGroups(groups) }
 
         let copy1 = index(in: tree, named: "copy1.bin")!
         let copy2 = index(in: tree, named: "copy2.bin")!
@@ -80,7 +80,7 @@ final class DuplicateDetectorTests: XCTestCase {
             root.size += child.size
         }
         let tree = FileTreeBuilder.build(from: root, rootPath: tmp.path)
-        await DuplicateDetector().detect(in: tree)
+        if let groups = await DuplicateDetector().detect(in: tree) { tree.applyDuplicateGroups(groups) }
 
         let ia = index(in: tree, named: "a.bin")!, ib = index(in: tree, named: "b.bin")!, ic = index(in: tree, named: "c.bin")!
         XCTAssertNotNil(tree.records[ia].duplicateGroupID)
@@ -107,7 +107,7 @@ final class DuplicateDetectorTests: XCTestCase {
         let tree = FileTreeBuilder.build(from: root, rootPath: tmp.path)
 
         let detector = DuplicateDetector()
-        await detector.detect(in: tree)
+        if let groups = await detector.detect(in: tree) { tree.applyDuplicateGroups(groups) }
 
         let tiny1 = index(in: tree, named: "tiny1.txt")!
         let tiny2 = index(in: tree, named: "tiny2.txt")!
@@ -140,7 +140,7 @@ final class DuplicateDetectorTests: XCTestCase {
         let tree = FileTreeBuilder.build(from: root, rootPath: tmp.path)
 
         let detector = DuplicateDetector()
-        await detector.detect(in: tree)
+        if let groups = await detector.detect(in: tree) { tree.applyDuplicateGroups(groups) }
 
         let a = index(in: tree, named: "a.bin")!
         let b = index(in: tree, named: "b.bin")!
@@ -171,7 +171,7 @@ final class DuplicateDetectorTests: XCTestCase {
         let tree = FileTreeBuilder.build(from: root, rootPath: tmp.path)
 
         let detector = DuplicateDetector()
-        await detector.detect(in: tree)
+        if let groups = await detector.detect(in: tree) { tree.applyDuplicateGroups(groups) }
 
         let s1 = index(in: tree, named: "s1.bin")!
         let s2 = index(in: tree, named: "s2.bin")!
@@ -217,7 +217,7 @@ final class DuplicateDetectorTests: XCTestCase {
         let tree = FileTreeBuilder.build(from: root, rootPath: tmp.path)
 
         let detector = DuplicateDetector()
-        await detector.detect(in: tree)
+        if let groups = await detector.detect(in: tree) { tree.applyDuplicateGroups(groups) }
 
         var seenGroupIDs = Set<UUID>()
         for (nameA, nameB) in pairNames {
@@ -232,5 +232,32 @@ final class DuplicateDetectorTests: XCTestCase {
             }
         }
         XCTAssertEqual(seenGroupIDs.count, pairCount)
+    }
+}
+
+final class DuplicateDetectorFocusTests: XCTestCase {
+    func test_focus_only_examines_matching_size_buckets() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let small = Data(repeating: 5, count: 8192)
+        let large = Data(repeating: 9, count: 16384)
+        let files: [(String, Data)] = [("s1.bin", small), ("s2.bin", small), ("l1.bin", large), ("l2.bin", large)]
+        let root = FSNode(url: tmp, name: "root", isDirectory: true, size: 0, fileExtension: "", parent: nil)
+        for (name, data) in files {
+            let url = tmp.appendingPathComponent(name)
+            try data.write(to: url)
+            root.children.append(FSNode(url: url, name: name, isDirectory: false, size: Int64(data.count), fileExtension: "bin", parent: root))
+        }
+        let tree = FileTreeBuilder.build(from: root, rootPath: tmp.path)
+        let idx = { (n: String) in tree.records.firstIndex { $0.name == n }! }
+
+        // Focus on the small pair only: the large pair is never touched.
+        let detected = await DuplicateDetector().detect(in: tree, focusing: [idx("s1.bin")])
+        let result = try XCTUnwrap(detected)
+        XCTAssertEqual(Set(result.keys), [idx("s1.bin"), idx("s2.bin")])
+        XCTAssertNotNil(result[idx("s1.bin")]!)
+        XCTAssertEqual(result[idx("s1.bin")]!, result[idx("s2.bin")]!)
     }
 }

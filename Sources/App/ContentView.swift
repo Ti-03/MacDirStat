@@ -602,7 +602,7 @@ private struct DashboardSettingsView: View {
                     if vm.hasFullDiskAccess && vm.deniedCount > 0 {
                         caption("\(vm.deniedCount) folders were still unreadable in the last scan. If DirStat is already listed, remove it with “−” and drag this copy in again — macOS ties the grant to one exact copy.")
                     } else {
-                        caption("Without it, protected folders scan as 0 bytes and land in “Hidden & Unreadable Space”.")
+                        caption("Without it, protected folders scan as 0 bytes and land in “System & Unreadable Space”.")
                     }
                 }
                 }
