@@ -3,7 +3,7 @@
 All notable changes to MacDirStat are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [1.4.0] - 2026-09-08
+## [1.5.0] - 2026-09-08
 
 A correctness release: the scan total is now right by default, and a long
 list of user-visible bugs found in an end-to-end audit are fixed.
@@ -83,6 +83,14 @@ list of user-visible bugs found in an end-to-end audit are fixed.
   expansion survive deletes; the sidebar Duplicates link that stranded the
   user in the detail pane is gone; Export CSV is disabled with no scan
   loaded; the toolbar shows progress while comparing.
+
+## [1.4.0] - 2026-08-25 (Mac App Store)
+
+- Back on the Mac App Store after 1.0: a sandboxed store configuration
+  built from the same source as the Developer ID release, with Sparkle
+  removed from the store bundle and "auto-scan last folder" carried through
+  a security-scoped bookmark. Full Disk Access features are hidden in the
+  store build, since a sandboxed app cannot hold that grant.
 
 ## [1.3.0] - 2026-08-04
 
