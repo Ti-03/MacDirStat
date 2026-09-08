@@ -3,7 +3,7 @@
 All notable changes to MacDirStat are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [1.5.0] - 2026-09-08
+## [1.4.1] - 2026-09-08
 
 A correctness release: the scan total is now right by default, and a long
 list of user-visible bugs found in an end-to-end audit are fixed.
