@@ -16,10 +16,15 @@ import Foundation
 // summarizing a huge subtree is a scan-speed win too, not just a node-count
 // win.
 
-// Directory names that are, by convention, generated dependency/package
-// trees not worth browsing file-by-file. Matched against a directory's own
-// name; bypasses the depth gate below.
-private let knownGeneratedDirectoryNames: Set<String> = ["node_modules"]
+// Directory names that are, by convention, generated dependency/package/
+// cache trees not worth browsing file-by-file. Matched against a directory's
+// own name; bypasses the depth gate below. Only names that are unambiguous
+// belong here: a user's own folder called "build" or "target" must never be
+// collapsed. Shared with ScanViewModel's splice-refresh guard.
+let knownGeneratedDirectoryNames: Set<String> = [
+    "node_modules", ".git", "Pods", ".next", ".nuxt", ".venv", "venv",
+    "__pycache__", ".gradle", ".build", ".cargo", ".pnpm-store", ".yarn",
+]
 
 enum AtomicSummaryThresholds {
     // Overridable via env var so tests can exercise the general heuristic

@@ -60,14 +60,15 @@ public final class ScanViewModel: ObservableObject {
     private var fdaSheetShownThisLaunch = false
 
     public init() {
+        Self.migrateLegacyExclusionDefault(in: UserDefaults.standard)
         UserDefaults.standard.register(defaults: [
             "realtimeMonitoring": true,
             "autoScanLastFolder": false,
-            "showHiddenFiles": false,
+            "showHiddenFiles": ScanDefaults.showHiddenFiles,
             "useBinarySize": false,
             "treemapColorScheme": "byType",
             "showFileCount": false,
-            "excludedFolderNames": ".git,node_modules,DerivedData,.Trash",
+            "excludedFolderNames": ScanDefaults.excludedFolderNames,
             "defaultTab": "treemap",
         ])
         setupMemoryPressureHandler()
@@ -89,6 +90,22 @@ public final class ScanViewModel: ObservableObject {
            UserDefaults.standard.bool(forKey: "autoScanLastFolder"),
            let last = Self.resolveLastScannedFolder() {
             scan(url: last)
+        }
+    }
+
+    // MARK: - Legacy defaults migration
+
+    /// Releases up to 1.3 shipped `.git,node_modules,DerivedData,.Trash` as the
+    /// factory exclusion list and persisted it into the preferences file, so a
+    /// new factory default alone never reaches existing installs. Resets that
+    /// exact legacy value once; a user who has customised the list, or who
+    /// re-enters the legacy list after the migration ran, is left alone.
+    nonisolated static func migrateLegacyExclusionDefault(in defaults: UserDefaults) {
+        let flag = "legacyExclusionDefaultMigrated"
+        guard !defaults.bool(forKey: flag) else { return }
+        defaults.set(true, forKey: flag)
+        if defaults.string(forKey: "excludedFolderNames") == ".git,node_modules,DerivedData,.Trash" {
+            defaults.removeObject(forKey: "excludedFolderNames")
         }
     }
 
@@ -471,7 +488,7 @@ public final class ScanViewModel: ObservableObject {
         guard !tree.records[index].isAutoSummarized else { return nil }
 
         let node = FileNode(tree: tree, index: index)
-        let showHiddenFiles = UserDefaults.standard.bool(forKey: "showHiddenFiles")
+        let showHiddenFiles = ScanConfig.loadFromUserDefaults().showHiddenFiles
         let excludedNames = parseExcludedNames()
 
         // Cross-tree hardlink dedup (BUG 2 fix): `scanSubtree`'s own
@@ -517,7 +534,7 @@ public final class ScanViewModel: ObservableObject {
             seenRefs: &seenRefs
         )
 
-        guard freshNode.name != "node_modules", !containsUnsummarizedGeneratedDirectory(freshNode) else { return nil }
+        guard !knownGeneratedDirectoryNames.contains(freshNode.name), !containsUnsummarizedGeneratedDirectory(freshNode) else { return nil }
 
         let subtree = FileTreeBuilder.build(from: freshNode, rootPath: node.url.path)
         var result = tree.replacingSubtree(at: index, with: subtree)
@@ -602,7 +619,7 @@ public final class ScanViewModel: ObservableObject {
     // See the last bullet of `splicedTree`'s doc comment above.
     private nonisolated static func containsUnsummarizedGeneratedDirectory(_ node: FSNode) -> Bool {
         for child in node.children where child.isDirectory {
-            if child.name == "node_modules" || containsUnsummarizedGeneratedDirectory(child) {
+            if knownGeneratedDirectoryNames.contains(child.name) || containsUnsummarizedGeneratedDirectory(child) {
                 return true
             }
         }
@@ -728,9 +745,7 @@ public final class ScanViewModel: ObservableObject {
 
     // Parses the excludedFolderNames default the same way FileScanner does.
     private nonisolated static func parseExcludedNames() -> Set<String> {
-        let raw = UserDefaults.standard.string(forKey: "excludedFolderNames")
-            ?? ".git,node_modules,DerivedData,.Trash"
-        return Set(raw.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+        ScanConfig.loadFromUserDefaults().excludedNames
     }
 
     // Re-stat the directory on disk and update children to match.
@@ -739,7 +754,7 @@ public final class ScanViewModel: ObservableObject {
     nonisolated static func refreshDirectory(node: FSNode) -> Bool {
         guard node.isDirectory else { return false }
         let fm = FileManager.default
-        let showHiddenFiles = UserDefaults.standard.bool(forKey: "showHiddenFiles")
+        let showHiddenFiles = ScanConfig.loadFromUserDefaults().showHiddenFiles
         let excludedNames = parseExcludedNames()
         guard let entries = try? fm.contentsOfDirectory(
             at: node.url,

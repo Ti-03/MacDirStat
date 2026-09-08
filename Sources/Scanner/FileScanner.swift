@@ -62,6 +62,23 @@ private final class ProgressCounter: @unchecked Sendable {
     }
 }
 
+// Factory defaults for the user-tunable scan settings. Single source of truth
+// for the registered defaults, the Settings UI, and the scanner itself.
+//
+// Nothing is excluded and dotfiles are counted: a disk-usage tool that skips
+// `.git`, `node_modules`, `DerivedData` and every hidden folder by default
+// reported a real 7.3 GB project as 40 MB. Generated trees are collapsed by
+// auto-summarization (see `knownGeneratedDirectoryNames`) instead of dropped,
+// so the total stays right and the treemap stays browsable.
+enum ScanDefaults {
+    static let excludedFolderNames = ""
+    static let showHiddenFiles = true
+
+    static func parseExcludedNames(_ raw: String) -> Set<String> {
+        Set(raw.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+    }
+}
+
 // Snapshot of scan-time settings, read once per scan (not per directory) to avoid
 // UserDefaults / environment overhead on the hot path.
 struct ScanConfig: Sendable {
@@ -77,10 +94,11 @@ struct ScanConfig: Sendable {
     let autoSummarizeEnabled: Bool
 
     static func loadFromUserDefaults() -> ScanConfig {
-        let rawExcluded = UserDefaults.standard.string(forKey: "excludedFolderNames")
-            ?? ".git,node_modules,DerivedData,.Trash"
-        let excludedNames = Set(rawExcluded.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
-        let showHiddenFiles = UserDefaults.standard.bool(forKey: "showHiddenFiles")
+        let rawExcluded = UserDefaults.standard.string(forKey: "excludedFolderNames") ?? ScanDefaults.excludedFolderNames
+        let excludedNames = ScanDefaults.parseExcludedNames(rawExcluded)
+        let showHiddenFiles = UserDefaults.standard.object(forKey: "showHiddenFiles") == nil
+            ? ScanDefaults.showHiddenFiles
+            : UserDefaults.standard.bool(forKey: "showHiddenFiles")
         let forceFallbackEnum = ProcessInfo.processInfo.environment["MDS_FORCE_FALLBACK_ENUM"] == "1"
         // Default-true feature flag: absent key means "on" (unlike the other
         // UserDefaults-backed flags above, which default to false/absent-Bool).

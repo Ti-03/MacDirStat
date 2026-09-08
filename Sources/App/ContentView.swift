@@ -479,8 +479,8 @@ private struct DashboardSettingsView: View {
     @EnvironmentObject private var vm: ScanViewModel
     @AppStorage("hapticFeedbackEnabled") private var hapticEnabled = true
     @AppStorage("useBinarySize")         private var useBinarySize = false
-    @AppStorage("showHiddenFiles")       private var showHiddenFiles = false
-    @AppStorage("excludedFolderNames")   private var excludedFolderNames = ".git,node_modules,DerivedData,.Trash"
+    @AppStorage("showHiddenFiles")       private var showHiddenFiles = ScanDefaults.showHiddenFiles
+    @AppStorage("excludedFolderNames")   private var excludedFolderNames = ScanDefaults.excludedFolderNames
     @AppStorage("autoScanLastFolder")    private var autoScanLastFolder = false
     @AppStorage("realtimeMonitoring")    private var realtimeMonitoring = true
     @AppStorage("defaultTab")            private var defaultTab = "treemap"
@@ -541,7 +541,7 @@ private struct DashboardSettingsView: View {
                         TextField("Comma-separated names", text: $excludedFolderNames)
                             .textFieldStyle(.roundedBorder)
                             .font(.system(size: 11, design: .monospaced))
-                        caption("Folder names to skip during scanning.")
+                        caption("Folder names to skip entirely. Skipped folders count as 0 bytes, so leave this empty for accurate totals; dependency and cache folders like node_modules are collapsed automatically instead.")
                     }
                 }
 
