@@ -130,7 +130,13 @@ struct TreemapRenderer {
         guard arcLen > 38, bandH > 12 else { return }
 
         let r  = cell.midRadius
-        let pt = CGPoint(x: center.x + r * cos(cell.midAngle), y: center.y + r * sin(cell.midAngle))
+        // `midAngle` is Double and the radii are CGFloat; mixing them inside one
+        // expression is ambiguous to the compiler on SDKs where the two types
+        // are distinct, so the trig is converted once, explicitly. (It is also
+        // reused by the placement loop below instead of being recomputed.)
+        let cosMid = CGFloat(cos(cell.midAngle))
+        let sinMid = CGFloat(sin(cell.midAngle))
+        let pt = CGPoint(x: center.x + r * cosMid, y: center.y + r * sinMid)
         let twoLine = arcLen > 72 && bandH > 26
 
         var ctx = context
@@ -175,7 +181,7 @@ struct TreemapRenderer {
             // layout radius, so the disc test uses the unpadded block.
             let maxShift = max(0, cell.outerRadius - r - blockH / 4)
             for shift in stride(from: CGFloat(0), through: maxShift, by: 2) {
-                pt = CGPoint(x: center.x + (r + shift) * cos(cell.midAngle), y: center.y + (r + shift) * sin(cell.midAngle))
+                pt = CGPoint(x: center.x + (r + shift) * cosMid, y: center.y + (r + shift) * sinMid)
                 let block = CGRect(x: pt.x - blockW / 2, y: pt.y - blockH / 2, width: blockW, height: blockH)
                 rect = block.insetBy(dx: -3, dy: -2)
                 if clearsCenterDisc(block, center: center) { clears = true; break }
