@@ -11,7 +11,14 @@ struct ContentView: View {
     @State private var showingSettings = false
     @AppStorage("defaultTab") private var defaultTab = "treemap"
     @AppStorage("treemapColorScheme") private var treemapColorScheme = "byType"
+    @AppStorage("useBinarySize") private var useBinarySize = false
     @Namespace private var tabNamespace
+
+    // `errorMessage` is the one channel every failure (scan, save, open,
+    // compare, export, trash) reports through; this is the one place it is shown.
+    private var errorAlertShown: Binding<Bool> {
+        Binding(get: { vm.errorMessage != nil }, set: { if !$0 { vm.errorMessage = nil } })
+    }
 
     private var showTree: Bool { userWantsTree && !scanHidesTree }
 
@@ -63,10 +70,13 @@ struct ContentView: View {
                     }
                 }
 
-                if vm.isScanning || vm.isComputingLayout {
+                if vm.isScanning || vm.isComputingLayout || vm.isComputingComparison {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
-                        if vm.isScanning {
+                        if vm.isComputingComparison {
+                            Text("Comparing…")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else if vm.isScanning {
                             Text("\(vm.itemsScanned) items")
                                 .font(.caption).foregroundStyle(.secondary).monospacedDigit()
                             Text(ByteFormatter.string(from: vm.bytesFound))
@@ -107,6 +117,12 @@ struct ContentView: View {
             if scanning { activeTab = .treemap }
         }
         .onChange(of: treemapColorScheme) { _ in vm.refreshLayout() }
+        .onChange(of: useBinarySize) { _ in vm.refreshLayout() }
+        .alert("Something Went Wrong", isPresented: errorAlertShown) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(vm.errorMessage ?? "")
+        }
         .onAppear {
             if defaultTab == "duplicates" { activeTab = .duplicates }
         }
@@ -202,7 +218,14 @@ struct ContentView: View {
             if vm.isReadOnlySnapshot {
                 SnapshotBanner(date: vm.snapshotDate)
             }
-            if !vm.hasFullDiskAccess || (vm.deniedCount > 0 && !vm.isScanning) {
+            // The banner's whole call to action is Full Disk Access, which a
+            // sandboxed App Store build can't use. Blocked folders there are a
+            // fact of the sandbox, not something the user can fix. Likewise,
+            // once the grant is held, whatever is still denied is root-only
+            // (/private/var/db, …) and no setting will open it, so telling the
+            // user to grant access again is wrong (issue #24). Denied folders
+            // keep their lock icon and the count shows in Settings.
+            if !Build.isAppStore, !vm.hasFullDiskAccess {
                 FullDiskAccessBanner(hasFullDiskAccess: vm.hasFullDiskAccess, deniedCount: vm.deniedCount) {
                     vm.showFDASheet = true
                 }
@@ -222,10 +245,13 @@ struct ContentView: View {
         VStack(spacing: 0) {
             if showTree {
                 HSplitView {
+                    // Wide enough that the name column keeps ~120 pt next to
+                    // the fixed size/percent columns; at 220 names shrank to
+                    // three letters.
                     DirectoryTreeView()
-                        .frame(minWidth: 220, idealWidth: 300)
+                        .frame(minWidth: 290, idealWidth: 320)
                     TreemapView()
-                        .frame(minWidth: 300)
+                        .frame(minWidth: 300, idealWidth: 640)
                 }
             } else {
                 TreemapView()
@@ -476,8 +502,8 @@ private struct DashboardSettingsView: View {
     @EnvironmentObject private var vm: ScanViewModel
     @AppStorage("hapticFeedbackEnabled") private var hapticEnabled = true
     @AppStorage("useBinarySize")         private var useBinarySize = false
-    @AppStorage("showHiddenFiles")       private var showHiddenFiles = false
-    @AppStorage("excludedFolderNames")   private var excludedFolderNames = ".git,node_modules,DerivedData,.Trash"
+    @AppStorage("showHiddenFiles")       private var showHiddenFiles = ScanDefaults.showHiddenFiles
+    @AppStorage("excludedFolderNames")   private var excludedFolderNames = ScanDefaults.excludedFolderNames
     @AppStorage("autoScanLastFolder")    private var autoScanLastFolder = false
     @AppStorage("realtimeMonitoring")    private var realtimeMonitoring = true
     @AppStorage("defaultTab")            private var defaultTab = "treemap"
@@ -530,7 +556,7 @@ private struct DashboardSettingsView: View {
                 settingsSection("Files") {
                     Toggle("Show hidden files", isOn: $showHiddenFiles)
                         .toggleStyle(.switch).controlSize(.small)
-                    caption("Include dot-files like .DS_Store and .git in scans.")
+                    caption("Include dot-files and dot-folders (.git, .cache, .Trash, …). Turning this off makes totals smaller than Finder reports.")
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Excluded folders")
@@ -538,7 +564,7 @@ private struct DashboardSettingsView: View {
                         TextField("Comma-separated names", text: $excludedFolderNames)
                             .textFieldStyle(.roundedBorder)
                             .font(.system(size: 11, design: .monospaced))
-                        caption("Folder names to skip during scanning.")
+                        caption("Folder names to skip entirely. Skipped folders count as 0 bytes, so leave this empty for accurate totals; dependency and cache folders like node_modules are collapsed automatically instead.")
                     }
                 }
 
@@ -552,6 +578,10 @@ private struct DashboardSettingsView: View {
                     caption("Watch for file changes after scanning (uses FSEvents).")
                 }
 
+                // Nothing in this section applies to a sandboxed App Store
+                // build: the grant can't be held, so the status light, the drag
+                // tile and the settings shortcut would all be dead ends.
+                if !Build.isAppStore {
                 Divider()
 
                 settingsSection("Permissions") {
@@ -576,8 +606,9 @@ private struct DashboardSettingsView: View {
                     if vm.hasFullDiskAccess && vm.deniedCount > 0 {
                         caption("\(vm.deniedCount) folders were still unreadable in the last scan. If DirStat is already listed, remove it with “−” and drag this copy in again — macOS ties the grant to one exact copy.")
                     } else {
-                        caption("Without it, protected folders scan as 0 bytes and land in “Hidden & Unreadable Space”.")
+                        caption("Without it, protected folders scan as 0 bytes and land in “System & Unreadable Space”.")
                     }
+                }
                 }
 
                 Divider()
@@ -603,6 +634,10 @@ private struct DashboardSettingsView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Link("ti0.me", destination: URL(string: "http://ti0.me/")!)
+                        .font(.caption)
+                    // App Review wants a reachable privacy policy, and it's
+                    // worth having in the Developer ID build too.
+                    Link("Privacy Policy", destination: URL(string: "https://ti-03.github.io/MacDirStat/privacy")!)
                         .font(.caption)
                 }
                 .frame(maxWidth: .infinity)

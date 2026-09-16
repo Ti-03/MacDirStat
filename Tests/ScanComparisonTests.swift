@@ -189,3 +189,40 @@ final class ScanComparisonTests: XCTestCase {
         XCTAssertEqual(changes[0].delta, 0)
     }
 }
+
+final class ScanComparisonSummarizedTests: XCTestCase {
+    // `deps` is fully materialized in "before" and auto-summarized in "after"
+    // (it crossed the summarization threshold). The old report listed every
+    // file under it as removed; the directory's own growth must be the only row.
+    private func makeTree(summarized: Bool, depsSize: Int64) -> FileTree {
+        let root = FSNode(url: URL(fileURLWithPath: "/scan"), name: "scan", isDirectory: true, size: 0, fileExtension: "", parent: nil)
+        let keep = FSNode(url: URL(fileURLWithPath: "/scan/keep.txt"), name: "keep.txt", isDirectory: false, size: 10, fileExtension: "txt", parent: root)
+        let deps = FSNode(url: URL(fileURLWithPath: "/scan/deps"), name: "deps", isDirectory: true, size: depsSize, fileExtension: "", parent: root)
+        if summarized {
+            deps.isAutoSummarized = true
+            deps.descendantFileCount = 2
+        } else {
+            let a = FSNode(url: URL(fileURLWithPath: "/scan/deps/a.js"), name: "a.js", isDirectory: false, size: depsSize / 2, fileExtension: "js", parent: deps)
+            let b = FSNode(url: URL(fileURLWithPath: "/scan/deps/b.js"), name: "b.js", isDirectory: false, size: depsSize / 2, fileExtension: "js", parent: deps)
+            deps.children = [a, b]
+        }
+        root.children = [keep, deps]
+        root.size = keep.size + deps.size
+        return FileTreeBuilder.build(from: root, rootPath: "/scan")
+    }
+
+    func test_directory_that_became_summarized_reports_one_growth_row() {
+        let changes = ScanComparison.compare(before: makeTree(summarized: false, depsSize: 200),
+                                             after: makeTree(summarized: true, depsSize: 300))
+        XCTAssertEqual(changes.map(\.relativePath), ["deps"])
+        XCTAssertEqual(changes.first?.kind, .grew)
+        XCTAssertEqual(changes.first?.delta, 100)
+        XCTAssertTrue(changes.first?.isDirectory ?? false)
+    }
+
+    func test_summarized_on_both_sides_with_same_size_is_silent() {
+        let changes = ScanComparison.compare(before: makeTree(summarized: true, depsSize: 200),
+                                             after: makeTree(summarized: true, depsSize: 200))
+        XCTAssertTrue(changes.isEmpty)
+    }
+}

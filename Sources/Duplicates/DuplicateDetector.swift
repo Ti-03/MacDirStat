@@ -16,9 +16,28 @@ public actor DuplicateDetector {
     // Operates over flat FileTree indices rather than an FSNode tree — a
     // simple loop over `tree.records` reaches every node without recursion,
     // since the array already covers the whole tree regardless of hierarchy.
-    public func detect(in tree: FileTree) async {
+    //
+    // Returns the group id (or nil = "not a duplicate") for every candidate
+    // it examined, or nil if cancelled. It never writes to `tree`: the caller
+    // applies the result with `FileTree.applyDuplicateGroups` on the main
+    // actor, so SwiftUI never reads a record while it is being mutated here.
+    //
+    // `focus`: after a live-refresh splice only the freshly rescanned
+    // subtree is new. Passing its indices restricts hashing to files whose
+    // size matches one of the new files (the only ones whose duplicate
+    // status can have changed), instead of re-hashing the whole tree on
+    // every FSEvents batch. Every member of any affected size bucket is
+    // included, so existing groups in that bucket are re-evaluated whole.
+    public func detect(in tree: FileTree, focusing focus: Set<Int>? = nil) async -> [Int: UUID?]? {
         var candidates: [Int] = []
         collect(tree: tree, into: &candidates)
+        if let focus {
+            let sizes = Set(candidates.lazy.filter { focus.contains($0) }.map { tree.records[$0].size })
+            candidates = candidates.filter { sizes.contains(tree.records[$0].size) }
+        }
+        var assignments: [Int: UUID?] = [:]
+        assignments.reserveCapacity(candidates.count)
+        for index in candidates { assignments[index] = .some(nil) }
 
         // Group by size first — eliminates the vast majority of files cheaply
         let bySize = Dictionary(grouping: candidates) { tree.records[$0].size }
@@ -34,19 +53,22 @@ public actor DuplicateDetector {
         ) { index in
             Self.partialHash(url: FileNode(tree: tree, index: index).url, maxBytes: quickHashBytes)
         }
-        guard let quickHashResults else { return }
+        guard let quickHashResults else { return nil }
         for (index, qh) in quickHashResults {
             let key = "\(tree.records[index].size)-\(qh)"
             byQuickHash[key, default: []].append(index)
         }
 
-        // Small-file shortcut: if a file's whole content fits within the quick-hash window,
-        // the quick hash already IS a full-content hash, so those groups are final as-is.
-        // Only groups whose files exceed the quick-hash window need a full-file hash pass.
+        // Small-file shortcut: when the quick hash reached end-of-file, it already
+        // IS a full-content hash, so that group is final. Whether EOF was hit is
+        // part of the hash key (see `partialHash`), never inferred from
+        // `record.size`: that field is the ALLOCATED size, and a sparse or
+        // APFS-compressed file can occupy a few KB on disk while holding
+        // megabytes of content that differ after the first 64 KB.
         var hashGroups: [String: [Int]] = [:]
         var toFullHash: [Int] = []
         for (key, indices) in byQuickHash where indices.count > 1 {
-            if tree.records[indices[0]].size <= Int64(quickHashBytes) {
+            if key.hasSuffix(Self.reachedEOFMarker) {
                 hashGroups[key] = indices
             } else {
                 toFullHash.append(contentsOf: indices)
@@ -59,7 +81,7 @@ public actor DuplicateDetector {
             let fullHashResults: [(Int, String)]? = await Self.hashInParallel(indices: toFullHash) { index in
                 Self.fullHash(url: FileNode(tree: tree, index: index).url)
             }
-            guard let fullHashResults else { return }
+            guard let fullHashResults else { return nil }
             for (index, hash) in fullHashResults {
                 let key = "\(tree.records[index].size)-\(hash)"
                 hashGroups[key, default: []].append(index)
@@ -68,10 +90,11 @@ public actor DuplicateDetector {
 
         // Assign group IDs to genuine duplicates
         for (_, indices) in hashGroups where indices.count > 1 {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else { return nil }
             let groupID = UUID()
-            for index in indices { tree.setDuplicateGroupID(groupID, at: index) }
+            for index in indices { assignments[index] = groupID }
         }
+        return assignments
     }
 
     private func collect(tree: FileTree, into list: inout [Int]) {
@@ -133,7 +156,11 @@ public actor DuplicateDetector {
         return results
     }
 
-    // Reads up to `maxBytes` from the file and returns a SHA256 hex string.
+    static let reachedEOFMarker = "-eof"
+
+    // Reads up to `maxBytes` from the file and returns a SHA256 hex string,
+    // suffixed with `reachedEOFMarker` when the whole file fit in the window
+    // (so the caller knows the partial hash is in fact a full-content hash).
     // Each chunk is drained from the autorelease pool immediately to prevent accumulation.
     private static func partialHash(url: URL, maxBytes: Int) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
@@ -141,15 +168,23 @@ public actor DuplicateDetector {
         var hasher = SHA256()
         var remaining = maxBytes
         let chunkSize = min(65_536, maxBytes)
+        var reachedEOF = false
         while remaining > 0 {
             if Task.isCancelled { return nil }
             let toRead = min(chunkSize, remaining)
             let chunk: Data? = autoreleasepool { try? handle.read(upToCount: toRead) }
-            guard let chunk, !chunk.isEmpty else { break }
+            guard let chunk, !chunk.isEmpty else { reachedEOF = true; break }
             hasher.update(data: chunk)
             remaining -= chunk.count
         }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        if !reachedEOF {
+            // Exactly filled the window: peek one byte to tell "file is exactly
+            // maxBytes long" apart from "there is more".
+            let probe: Data? = autoreleasepool { try? handle.read(upToCount: 1) }
+            reachedEOF = (probe?.isEmpty ?? true)
+        }
+        let hex = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return reachedEOF ? hex + reachedEOFMarker : hex
     }
 
     // Full-file SHA256. Each 1 MB chunk is released immediately via autoreleasepool,

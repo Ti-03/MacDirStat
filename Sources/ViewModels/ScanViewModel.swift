@@ -58,16 +58,22 @@ public final class ScanViewModel: ObservableObject {
     private var securityScopedURL: URL?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var fdaSheetShownThisLaunch = false
+    // Bumped by every scan(), openArchive() and cancelScan(). Work that resumes
+    // on the main actor after an await compares against it, so a finished
+    // scan A can't install its tree over scan B that started meanwhile, and a
+    // slow archive decode can't flip a newer live scan into a read-only snapshot.
+    private var scanGeneration = 0
 
     public init() {
+        Self.migrateLegacyExclusionDefault(in: UserDefaults.standard)
         UserDefaults.standard.register(defaults: [
             "realtimeMonitoring": true,
             "autoScanLastFolder": false,
-            "showHiddenFiles": false,
+            "showHiddenFiles": ScanDefaults.showHiddenFiles,
             "useBinarySize": false,
             "treemapColorScheme": "byType",
             "showFileCount": false,
-            "excludedFolderNames": ".git,node_modules,DerivedData,.Trash",
+            "excludedFolderNames": ScanDefaults.excludedFolderNames,
             "defaultTab": "treemap",
         ])
         setupMemoryPressureHandler()
@@ -87,10 +93,74 @@ public final class ScanViewModel: ObservableObject {
 
         if !resumedPendingRescan,
            UserDefaults.standard.bool(forKey: "autoScanLastFolder"),
-           let path = UserDefaults.standard.string(forKey: "lastScannedPath"),
-           FileManager.default.fileExists(atPath: path) {
-            scan(url: URL(fileURLWithPath: path))
+           let last = Self.resolveLastScannedFolder() {
+            scan(url: last)
         }
+    }
+
+    // MARK: - Legacy defaults migration
+
+    /// Releases up to 1.3 shipped `.git,node_modules,DerivedData,.Trash` as the
+    /// factory exclusion list and "hide hidden files", and persisted both into
+    /// the preferences file, so a new factory default alone never reaches
+    /// existing installs. Each step runs once: it resets exactly the legacy
+    /// value (a customised exclusion list is left alone) and, for hidden files,
+    /// the legacy `false`, since with 1.3's defaults that value is
+    /// indistinguishable from "never touched". A user who wants dot-files
+    /// hidden again flips the toggle once more.
+    nonisolated static func migrateLegacyExclusionDefault(in defaults: UserDefaults) {
+        let versionKey = "legacyDefaultsMigration"
+        // Step 1 shipped under a Bool flag before this became versioned.
+        var done = defaults.integer(forKey: versionKey)
+        if done == 0, defaults.bool(forKey: "legacyExclusionDefaultMigrated") { done = 1 }
+
+        if done < 1, defaults.string(forKey: "excludedFolderNames") == ".git,node_modules,DerivedData,.Trash" {
+            defaults.removeObject(forKey: "excludedFolderNames")
+        }
+        if done < 2, defaults.object(forKey: "showHiddenFiles") != nil, !defaults.bool(forKey: "showHiddenFiles") {
+            defaults.removeObject(forKey: "showHiddenFiles")
+        }
+        defaults.set(2, forKey: versionKey)
+    }
+
+    // MARK: - Last scanned folder
+
+    static let lastScannedBookmarkKey = "lastScannedBookmark"
+
+    /// A sandboxed build loses access to a folder the moment the process exits, so
+    /// "auto-scan last folder" needs a security-scoped bookmark, not a bare path.
+    /// Must be called while the security scope for `url` is still held.
+    static func rememberLastScannedFolder(_ url: URL) {
+        UserDefaults.standard.set(url.path, forKey: "lastScannedPath")
+        guard Build.isAppStore else { return }
+        if let data = try? url.bookmarkData(options: .withSecurityScope,
+                                            includingResourceValuesForKeys: nil,
+                                            relativeTo: nil) {
+            UserDefaults.standard.set(data, forKey: lastScannedBookmarkKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: lastScannedBookmarkKey)
+        }
+    }
+
+    /// The folder to resume on launch, or nil if there isn't a usable one.
+    static func resolveLastScannedFolder() -> URL? {
+        guard Build.isAppStore else {
+            guard let path = UserDefaults.standard.string(forKey: "lastScannedPath"),
+                  FileManager.default.fileExists(atPath: path) else { return nil }
+            return URL(fileURLWithPath: path)
+        }
+        guard let data = UserDefaults.standard.data(forKey: lastScannedBookmarkKey) else { return nil }
+        var stale = false
+        // A stale bookmark still resolves; scan(url:) records a fresh one on the
+        // way through, so there's nothing to repair here.
+        guard let url = try? URL(resolvingBookmarkData: data,
+                                 options: .withSecurityScope,
+                                 relativeTo: nil,
+                                 bookmarkDataIsStale: &stale) else {
+            UserDefaults.standard.removeObject(forKey: lastScannedBookmarkKey)
+            return nil
+        }
+        return url
     }
 
     deinit {
@@ -98,9 +168,31 @@ public final class ScanViewModel: ObservableObject {
     }
 
     private func checkFullDiskAccess() {
-        // TCC.db is only readable when Full Disk Access is granted
-        let probe = "/Library/Application Support/com.apple.TCC/TCC.db"
-        hasFullDiskAccess = FileManager.default.isReadableFile(atPath: probe)
+        // A sandboxed App Store build can never hold Full Disk Access, so the
+        // probe would always fail and the app would nag about a permission the
+        // user cannot grant. Report satisfied and let the open panel be the
+        // only way in.
+        guard !Build.isAppStore else {
+            hasFullDiskAccess = true
+            return
+        }
+        hasFullDiskAccess = Self.probeFullDiskAccess()
+    }
+
+    /// Ground truth is whether a TCC-protected file actually opens, because that
+    /// is exactly what the scanner will hit. `access(2)` (isReadableFile) is not
+    /// the same check the sandbox applies to `open(2)`, and either TCC database
+    /// alone can be missing or unreadable for reasons unrelated to the grant.
+    nonisolated static func probeFullDiskAccess() -> Bool {
+        let probes = [
+            "/Library/Application Support/com.apple.TCC/TCC.db",
+            NSHomeDirectory() + "/Library/Application Support/com.apple.TCC/TCC.db",
+        ]
+        for path in probes {
+            let fd = open(path, O_RDONLY | O_CLOEXEC)
+            if fd >= 0 { close(fd); return true }
+        }
+        return false
     }
 
     /// Public wrapper so the onboarding sheet can poll for a live permission change
@@ -170,8 +262,10 @@ public final class ScanViewModel: ObservableObject {
         isWatching = false
         hasStaleResults = false
         layoutGeneration += 1       // invalidate any in-progress layout
+        scanGeneration += 1
+        let generation = scanGeneration
         scanURL = url
-        UserDefaults.standard.set(url.path, forKey: "lastScannedPath")
+        Self.rememberLastScannedFolder(url)
         isReadOnlySnapshot = false
         snapshotDate = nil
         tree = nil
@@ -231,12 +325,15 @@ public final class ScanViewModel: ObservableObject {
                     await Task.detached(priority: .userInitiated) {
                         Self.tagSafetyLevels(tree: finalTree)
                     }.value
+                    // A newer scan/archive/cancel superseded this one while tagging ran.
+                    guard self.scanGeneration == generation else { return }
                     self.tree = finalTree
                     let rootNode = FileNode(tree: finalTree, index: finalTree.rootIndex)
                     let map = ExtensionColorMap(root: rootNode)
                     self.colorMap = map
                     await self.recomputeLayout()
                     // isComputingLayout set to false inside recomputeLayout
+                    guard self.scanGeneration == generation else { return }
 
                     // Start live file watching (if enabled)
                     if UserDefaults.standard.bool(forKey: "realtimeMonitoring") {
@@ -251,18 +348,7 @@ public final class ScanViewModel: ObservableObject {
                         await MainActor.run { vm?.extensionSummaries = summaries }
                     }
                     // Duplicate detection: lower priority, also off main actor
-                    self.duplicateTask = Task.detached(priority: .utility) { [finalTree, weak self] in
-                        let detector = DuplicateDetector()
-                        await detector.detect(in: finalTree)
-                        guard !Task.isCancelled else { return }
-                        let groups = Self.buildDuplicateGroups(tree: finalTree)
-                        guard !Task.isCancelled else { return }
-                        let vm = self
-                        await MainActor.run {
-                            vm?.duplicatesReady = true
-                            vm?.duplicateGroups = groups
-                        }
-                    }
+                    self.runDuplicateDetection(on: finalTree)
                 case .failed(let msg):
                     self.errorMessage = msg
                     self.isScanning = false
@@ -274,6 +360,7 @@ public final class ScanViewModel: ObservableObject {
 
     public func cancelScan() {
         Task { await scanner.cancel() }
+        scanGeneration += 1
         scanTask?.cancel()
         extensionTask?.cancel()
         duplicateTask?.cancel()
@@ -356,18 +443,31 @@ public final class ScanViewModel: ObservableObject {
             return
         }
 
-        var workingTree = startingTree
-        var skippedUnspliceable = false
-        for changedPath in paths {
-            guard let spliced = Self.splicedTree(afterChangeAt: changedPath, in: workingTree) else {
-                if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
-                    FileHandle.standardError.write("REFRESH skipped-unspliceable path=\(changedPath)\n".data(using: .utf8)!)
+        // Each splice re-walks the changed directory on disk and copies the
+        // whole record array; on a large tree with a build running that is
+        // hundreds of milliseconds per FSEvents batch, so it runs off the main
+        // actor. Everything it needs is immutable (`splicedTree` is a
+        // nonisolated static over a FileTree whose topology never changes).
+        let debug = ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil
+        let (workingTree, skippedUnspliceable) = await Task.detached(priority: .utility) { () -> (FileTree, Bool) in
+            var working = startingTree
+            var skipped = false
+            for changedPath in paths {
+                guard let spliced = Self.splicedTree(afterChangeAt: changedPath, in: working) else {
+                    if debug {
+                        FileHandle.standardError.write("REFRESH skipped-unspliceable path=\(changedPath)\n".data(using: .utf8)!)
+                    }
+                    skipped = true
+                    continue
                 }
-                skippedUnspliceable = true
-                continue
+                working = spliced
             }
-            workingTree = spliced
-        }
+            return (working, skipped)
+        }.value
+
+        // A trash, a new scan or an opened archive replaced `tree` meanwhile:
+        // this result was derived from a tree that is no longer on screen.
+        guard tree === startingTree else { return }
 
         if skippedUnspliceable { hasStaleResults = true }
 
@@ -376,7 +476,7 @@ public final class ScanViewModel: ObservableObject {
         if ProcessInfo.processInfo.environment["MDS_DEBUG_TREE"] != nil {
             FileHandle.standardError.write("REFRESH spliced changedPaths=\(paths.count) root=\(scanURL.path)\n".data(using: .utf8)!)
         }
-        await applySplicedTree(workingTree, from: startingTree)
+        await applySplicedTree(workingTree, from: startingTree, changedPaths: paths)
     }
 
     // Rescans exactly the on-disk directory at `changedPath` (a full,
@@ -424,7 +524,7 @@ public final class ScanViewModel: ObservableObject {
         guard !tree.records[index].isAutoSummarized else { return nil }
 
         let node = FileNode(tree: tree, index: index)
-        let showHiddenFiles = UserDefaults.standard.bool(forKey: "showHiddenFiles")
+        let showHiddenFiles = ScanConfig.loadFromUserDefaults().showHiddenFiles
         let excludedNames = parseExcludedNames()
 
         // Cross-tree hardlink dedup (BUG 2 fix): `scanSubtree`'s own
@@ -470,7 +570,7 @@ public final class ScanViewModel: ObservableObject {
             seenRefs: &seenRefs
         )
 
-        guard freshNode.name != "node_modules", !containsUnsummarizedGeneratedDirectory(freshNode) else { return nil }
+        guard !knownGeneratedDirectoryNames.contains(freshNode.name), !containsUnsummarizedGeneratedDirectory(freshNode) else { return nil }
 
         let subtree = FileTreeBuilder.build(from: freshNode, rootPath: node.url.path)
         var result = tree.replacingSubtree(at: index, with: subtree)
@@ -555,7 +655,7 @@ public final class ScanViewModel: ObservableObject {
     // See the last bullet of `splicedTree`'s doc comment above.
     private nonisolated static func containsUnsummarizedGeneratedDirectory(_ node: FSNode) -> Bool {
         for child in node.children where child.isDirectory {
-            if child.name == "node_modules" || containsUnsummarizedGeneratedDirectory(child) {
+            if knownGeneratedDirectoryNames.contains(child.name) || containsUnsummarizedGeneratedDirectory(child) {
                 return true
             }
         }
@@ -580,7 +680,7 @@ public final class ScanViewModel: ObservableObject {
     // anything else touches `newTree.records`: it and `DuplicateDetector`
     // both mutate that array in place, so — same reasoning as `scan(url:)` —
     // they can't be allowed to run concurrently with each other.
-    private func applySplicedTree(_ newTree: FileTree, from oldTree: FileTree) async {
+    private func applySplicedTree(_ newTree: FileTree, from oldTree: FileTree, changedPaths: [String]) async {
         let selectedPath = selectedNode.map { oldTree.path(of: $0.index) }
         let drillPaths = drillStack.map { oldTree.path(of: $0.index) }
 
@@ -588,6 +688,9 @@ public final class ScanViewModel: ObservableObject {
             Self.tagSafetyLevels(tree: newTree)
         }.value
 
+        // A trash or a new scan replaced the tree while tagging ran; installing
+        // this splice would resurrect what the user just deleted.
+        guard tree === oldTree else { return }
         self.tree = newTree
 
         if let selectedPath, let idx = Self.findIndex(forPath: selectedPath, in: newTree) {
@@ -614,21 +717,47 @@ public final class ScanViewModel: ObservableObject {
             await MainActor.run { self?.extensionSummaries = summaries }
         }
 
+        // Only the rescanned subtrees are new; hash just the size buckets
+        // they touch instead of the whole tree on every FSEvents batch. If
+        // detection had not finished yet there is nothing to build on, so
+        // run it in full.
+        var focus: Set<Int>? = nil
+        if duplicatesReady {
+            var indices = Set<Int>()
+            for path in changedPaths {
+                let normalized = (path.hasSuffix("/") && path != "/") ? String(path.dropLast()) : path
+                if let start = Self.findIndex(forPath: normalized, in: newTree) {
+                    var stack = [start]
+                    while let i = stack.popLast() {
+                        indices.insert(i)
+                        let s = newTree.childStart[i], c = newTree.childCount[i]
+                        for offset in 0..<c { stack.append(newTree.childIndices[s + offset]) }
+                    }
+                }
+            }
+            focus = indices
+        }
+        runDuplicateDetection(on: newTree, focusing: focus)
+
+        isComputingLayout = true
+        await recomputeLayout()
+    }
+
+    // Detects off the main actor, applies the result on it (so no view ever
+    // reads a record mid-write), then regroups. Cancels any run in flight.
+    private func runDuplicateDetection(on tree: FileTree, focusing focus: Set<Int>? = nil) {
         duplicateTask?.cancel()
         duplicateTask = Task.detached(priority: .utility) { [weak self] in
-            let detector = DuplicateDetector()
-            await detector.detect(in: newTree)
+            guard let assignments = await DuplicateDetector().detect(in: tree, focusing: focus) else { return }
             guard !Task.isCancelled else { return }
-            let groups = Self.buildDuplicateGroups(tree: newTree)
+            await MainActor.run { tree.applyDuplicateGroups(assignments) }
+            let groups = Self.buildDuplicateGroups(tree: tree)
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 self?.duplicatesReady = true
                 self?.duplicateGroups = groups
             }
         }
-
-        isComputingLayout = true
-        await recomputeLayout()
     }
 
     // Walk the tree by path components to find the FSNode for a given path.
@@ -681,9 +810,7 @@ public final class ScanViewModel: ObservableObject {
 
     // Parses the excludedFolderNames default the same way FileScanner does.
     private nonisolated static func parseExcludedNames() -> Set<String> {
-        let raw = UserDefaults.standard.string(forKey: "excludedFolderNames")
-            ?? ".git,node_modules,DerivedData,.Trash"
-        return Set(raw.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+        ScanConfig.loadFromUserDefaults().excludedNames
     }
 
     // Re-stat the directory on disk and update children to match.
@@ -692,7 +819,7 @@ public final class ScanViewModel: ObservableObject {
     nonisolated static func refreshDirectory(node: FSNode) -> Bool {
         guard node.isDirectory else { return false }
         let fm = FileManager.default
-        let showHiddenFiles = UserDefaults.standard.bool(forKey: "showHiddenFiles")
+        let showHiddenFiles = ScanConfig.loadFromUserDefaults().showHiddenFiles
         let excludedNames = parseExcludedNames()
         guard let entries = try? fm.contentsOfDirectory(
             at: node.url,
@@ -861,6 +988,12 @@ public final class ScanViewModel: ObservableObject {
         return hidden >= oneGB ? hidden : nil
     }
 
+    // What the gap on a volume scan actually is: other volumes in the same
+    // APFS container (Preboot, Recovery, VM), snapshot and purgeable space,
+    // filesystem metadata, and anything the process was denied. None of it
+    // is hidden files, which are scanned.
+    static let syntheticSpaceNodeName = "System & Unreadable Space"
+
     // When the scanned URL is itself a volume's mount point, returns a NEW
     // tree with a synthetic "Hidden & Unreadable Space" child representing
     // the portion of the volume's used space the scanner could never
@@ -873,9 +1006,15 @@ public final class ScanViewModel: ObservableObject {
               volumeURL.standardizedFileURL.path == scannedURL.standardizedFileURL.path
         else { return nil }
 
-        guard let volumeValues = try? scannedURL.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey]),
+        // "Important usage" availability is the figure Finder and Storage
+        // settings show: it treats purgeable space (local Time Machine
+        // snapshots, caches the system will evict) as free. Using the plain
+        // available figure instead reported all of that purgeable space as
+        // "unreadable", which on a typical Mac is tens of GB that no
+        // permission grant could ever make visible (issue #24).
+        guard let volumeValues = try? scannedURL.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]),
               let totalCapacity = volumeValues.volumeTotalCapacity,
-              let availableCapacity = volumeValues.volumeAvailableCapacity
+              let availableCapacity = volumeValues.volumeAvailableCapacityForImportantUsage ?? volumeValues.volumeAvailableCapacity.map(Int64.init)
         else { return nil }
 
         guard let hidden = hiddenSpaceBytes(
@@ -884,7 +1023,7 @@ public final class ScanViewModel: ObservableObject {
             scannedTotal: tree.records[tree.rootIndex].size
         ) else { return nil }
 
-        return tree.appendingSyntheticRootChild(name: "Hidden & Unreadable Space", size: hidden)
+        return tree.appendingSyntheticRootChild(name: Self.syntheticSpaceNodeName, size: hidden)
     }
 
     // Walk up the parent chain recalculating folder sizes from their children.
@@ -912,7 +1051,9 @@ public final class ScanViewModel: ObservableObject {
     }
 
     public func drillDown(into node: FileNode) {
-        guard node.isDirectory else { return }
+        // Auto-summarized folders have no materialized children: drilling in
+        // would show an empty chart with no way back, so select instead.
+        guard node.isDrillable else { select(node); return }
         drillStack.append(node)
         Task { await recomputeLayout() }
     }
@@ -932,9 +1073,18 @@ public final class ScanViewModel: ObservableObject {
     }
 
     public func refreshLayout() {
-        guard let root else { return }
-        colorMap = ExtensionColorMap(root: root)
+        guard let root, let currentTree = tree else { return }
+        let map = ExtensionColorMap(root: root)
+        colorMap = map
         Task { await recomputeLayout() }
+        // The legend bakes each extension's color in, so a color-scheme change
+        // must rebuild it too, not just the chart.
+        extensionTask?.cancel()
+        extensionTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let summaries = Self.buildExtensionSummaries(tree: currentTree, map: map)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self?.extensionSummaries = summaries }
+        }
     }
 
     // MARK: - Move to Trash (prune-in-place, no rescan)
@@ -957,25 +1107,63 @@ public final class ScanViewModel: ObservableObject {
     // the wrong (current, possibly since-changed) file or silently no-op,
     // neither of which is acceptable, so this is a hard no-op while a
     // snapshot is loaded.
+    // Returns whether a trash operation was started (false for a read-only
+    // snapshot, an empty batch, or nodes that no longer resolve). The moves
+    // themselves run off the main actor: "Delete All Duplicates" over
+    // thousands of files used to freeze the UI for the whole loop. The tree
+    // is pruned when they finish.
     @discardableResult
     public func trashNodes(_ nodes: [FileNode]) -> Bool {
         guard !isReadOnlySnapshot, let currentTree = tree, !nodes.isEmpty else { return false }
 
-        var trashedIndices: [Int] = []
-        trashedIndices.reserveCapacity(nodes.count)
-        for node in nodes where ObjectIdentifier(node.tree) == ObjectIdentifier(currentTree) {
-            do {
-                try FileManager.default.trashItem(at: node.url, resultingItemURL: nil)
-                trashedIndices.append(node.index)
-            } catch {
-                // Swallow, same as the old per-call-site `try?` behavior —
-                // one failed delete (e.g. permissions) shouldn't block the
-                // rest of the batch or surface a blocking alert.
+        var targets: [(index: Int, path: String, name: String)] = []
+        for node in nodes where !node.isSynthetic {
+            // Duplicate groups and list rows can outlive a live-refresh splice
+            // and still point at the previous tree instance; resolve them by
+            // path instead of silently dropping the request.
+            let index: Int
+            if node.tree === currentTree {
+                index = node.index
+            } else if let resolved = Self.findIndex(forPath: node.tree.path(of: node.index), in: currentTree) {
+                index = resolved
+            } else {
+                continue
             }
+            targets.append((index, currentTree.path(of: index), node.name))
         }
-        guard !trashedIndices.isEmpty else { return false }
+        guard !targets.isEmpty else { return false }
 
-        pruneTree(afterTrashing: trashedIndices, from: currentTree)
+        Task { [weak self] in
+            let (trashed, failures) = await Task.detached(priority: .userInitiated) { () -> ([Int], [String]) in
+                var trashed: [Int] = []
+                var failures: [String] = []
+                for target in targets {
+                    do {
+                        try FileManager.default.trashItem(at: URL(fileURLWithPath: target.path), resultingItemURL: nil)
+                        trashed.append(target.index)
+                    } catch {
+                        // One failed delete (e.g. permissions) shouldn't block
+                        // the rest of the batch, but the user has to hear about
+                        // it: the item stays in the tree, so a silent failure
+                        // looks like a no-op.
+                        failures.append("\(target.name): \(error.localizedDescription)")
+                    }
+                }
+                return (trashed, failures)
+            }.value
+            guard let self else { return }
+            if !failures.isEmpty {
+                let shown = failures.prefix(3).joined(separator: "\n")
+                let more = failures.count > 3 ? "\n…and \(failures.count - 3) more" : ""
+                self.errorMessage = "Couldn't move to Trash:\n\(shown)\(more)"
+            }
+            guard !trashed.isEmpty else { return }
+            // The tree was replaced (splice, rescan) while the moves ran: the
+            // indices no longer apply. The files are gone from disk, so mark
+            // the display stale rather than prune the wrong nodes.
+            guard self.tree === currentTree else { self.hasStaleResults = true; return }
+            self.pruneTree(afterTrashing: trashed, from: currentTree)
+        }
         return true
     }
 
@@ -1025,11 +1213,18 @@ public final class ScanViewModel: ObservableObject {
             await MainActor.run { self?.extensionSummaries = summaries }
         }
 
-        duplicateTask?.cancel()
-        duplicateTask = Task.detached(priority: .utility) { [weak self] in
-            let groups = Self.buildDuplicateGroups(tree: newTree)
-            guard !Task.isCancelled else { return }
-            await MainActor.run { self?.duplicateGroups = groups }
+        // If detection was still running when the user trashed something,
+        // cancelling it above would otherwise leave "Scanning for duplicates…"
+        // spinning until the next full rescan, so finish detecting first.
+        if duplicatesReady {
+            duplicateTask?.cancel()
+            duplicateTask = Task.detached(priority: .utility) { [weak self] in
+                let groups = Self.buildDuplicateGroups(tree: newTree)
+                guard !Task.isCancelled else { return }
+                await MainActor.run { self?.duplicateGroups = groups }
+            }
+        } else {
+            runDuplicateDetection(on: newTree)
         }
 
         Task { await recomputeLayout() }
@@ -1085,7 +1280,7 @@ public final class ScanViewModel: ObservableObject {
 
     private nonisolated static func buildExtensionSummaries(tree: FileTree, map: ExtensionColorMap) -> [ExtensionSummary] {
         var groups: [String: (count: Int, size: Int64)] = [:]
-        for record in tree.records where !record.isDirectory {
+        for record in tree.records where !record.isDirectory && !record.isSynthetic {
             groups[record.fileExtension, default: (0, 0)].count += 1
             groups[record.fileExtension, default: (0, 0)].size  += record.size
         }
@@ -1093,7 +1288,7 @@ public final class ScanViewModel: ObservableObject {
         return groups.map { ext, stats in
             ExtensionSummary(
                 id: ext,
-                ext: ext.isEmpty ? "(directory)" : ".\(ext)",
+                ext: ext.isEmpty ? "(no extension)" : ".\(ext)",
                 color: map.color(for: ext),
                 fileCount: stats.count,
                 totalSize: stats.size,
@@ -1105,7 +1300,12 @@ public final class ScanViewModel: ObservableObject {
 
     private func recomputeLayout() async {
         guard let displayRoot = treemapRoot, let map = colorMap,
-              layoutSize.width > 1, layoutSize.height > 1 else { return }
+              layoutSize.width > 1, layoutSize.height > 1 else {
+            // Nothing is being computed (no size yet, e.g. a scan started from
+            // init before any view exists); `updateLayoutSize` will re-arm.
+            isComputingLayout = false
+            return
+        }
         layoutGeneration += 1
         let myGen = layoutGeneration
         isComputingLayout = true
@@ -1119,13 +1319,23 @@ public final class ScanViewModel: ObservableObject {
         self.isComputingLayout = false
     }
 
-    // Flat loop over every index — order doesn't matter (each node's safety
-    // level only depends on its own reconstructed path/name, both already
-    // fully populated by the builder before this runs).
+    // Iterative DFS building each node's absolute path from its parent's, so
+    // tagging a multi-million-node tree costs one string append per node
+    // instead of a parent-chain walk plus a URL allocation per node (that
+    // version kept a full-disk scan on "Scanning…" for two extra minutes
+    // after the walk itself had finished).
     private nonisolated static func tagSafetyLevels(tree: FileTree) {
-        for index in 0..<tree.records.count {
-            let node = FileNode(tree: tree, index: index)
-            tree.setSafety(SafetyAnalyzer.level(for: node), at: index)
+        var stack: [(index: Int, path: String)] = [(tree.rootIndex, tree.rootPath)]
+        while let (index, path) = stack.popLast() {
+            let record = tree.records[index]
+            tree.setSafety(SafetyAnalyzer.level(path: path, name: record.name, isSynthetic: record.isSynthetic), at: index)
+            let start = tree.childStart[index]
+            let count = tree.childCount[index]
+            for offset in 0..<count {
+                let child = tree.childIndices[start + offset]
+                let childPath = path.hasSuffix("/") ? path + tree.records[child].name : path + "/" + tree.records[child].name
+                stack.append((child, childPath))
+            }
         }
     }
 
@@ -1162,6 +1372,9 @@ public final class ScanViewModel: ObservableObject {
     // surfaces as `errorMessage` rather than crashing or hanging — see
     // `ScanArchive.validate()`.
     public func openArchive(from url: URL) {
+        Task { await scanner.cancel() }
+        scanGeneration += 1
+        let generation = scanGeneration
         scanTask?.cancel()
         extensionTask?.cancel()
         duplicateTask?.cancel()
@@ -1183,11 +1396,15 @@ public final class ScanViewModel: ObservableObject {
                 let archive = try decoder.decode(ScanArchive.self, from: data)
                 try archive.validate()
                 let tree = archive.makeTree()
-                await MainActor.run { self?.applyOpenedArchive(tree: tree, metadata: archive.metadata) }
+                await MainActor.run {
+                    guard let self, self.scanGeneration == generation else { return }
+                    self.applyOpenedArchive(tree: tree, metadata: archive.metadata)
+                }
             } catch {
                 await MainActor.run {
-                    self?.isScanning = false
-                    self?.errorMessage = "Couldn't open scan: \(error.localizedDescription)"
+                    guard let self, self.scanGeneration == generation else { return }
+                    self.isScanning = false
+                    self.errorMessage = "Couldn't open scan: \(error.localizedDescription)"
                 }
             }
         }
@@ -1207,7 +1424,9 @@ public final class ScanViewModel: ObservableObject {
         drillStack = []
         highlightedExtension = nil
         errorMessage = nil
-        UserDefaults.standard.set(metadata.scannedPath, forKey: "lastScannedPath")
+        // Reopening an archive is not a scan of that folder: leave the
+        // "auto-scan last folder" breadcrumb alone so the next launch does not
+        // start walking whatever path the archive happened to record.
 
         self.tree = tree
         let rootNode = FileNode(tree: tree, index: tree.rootIndex)

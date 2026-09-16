@@ -3,7 +3,9 @@ import SwiftUI
 struct DuplicatesView: View {
     @EnvironmentObject private var vm: ScanViewModel
     // Expanded state lives here so LazyVStack rows don't need @State on init
-    @State private var expanded: Set<Int> = []
+    // Keyed by the group's stable duplicateGroupID (not array offset), since
+    // groups re-sort after a delete and offsets would point at the wrong group.
+    @State private var expanded: Set<UUID> = []
 
     var body: some View {
         let groups = vm.duplicateGroups
@@ -19,16 +21,16 @@ struct DuplicatesView: View {
                 Divider()
                 ScrollView {
                     LazyVStack(spacing: 0, pinnedViews: []) {
-                        ForEach(Array(groups.enumerated()), id: \.offset) { index, group in
+                        ForEach(groups, id: \.groupKey) { group in
+                            let key = group.groupKey
                             GroupSection(
-                                index: index,
                                 group: group,
-                                isExpanded: expanded.contains(index),
+                                isExpanded: expanded.contains(key),
                                 isReadOnly: vm.isReadOnlySnapshot,
                                 onToggle: {
                                     withAnimation(.easeInOut(duration: 0.15)) {
-                                        if expanded.contains(index) { expanded.remove(index) }
-                                        else { expanded.insert(index) }
+                                        if expanded.contains(key) { expanded.remove(key) }
+                                        else { expanded.insert(key) }
                                     }
                                 },
                                 onDeleteGroup: { deleteGroup(group) },
@@ -89,10 +91,15 @@ struct DuplicatesView: View {
     }
 }
 
+// Stable identity for a duplicate group across re-sorts: keyed on the shared
+// duplicateGroupID rather than the array offset, which shifts after a delete.
+private extension Array where Element == FileNode {
+    var groupKey: UUID { first?.duplicateGroupID ?? UUID() }
+}
+
 // MARK: - Group section (value type — no @State, safe for LazyVStack)
 
 private struct GroupSection: View {
-    let index: Int
     let group: [FileNode]
     let isExpanded: Bool
     let isReadOnly: Bool

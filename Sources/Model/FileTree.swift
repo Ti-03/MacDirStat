@@ -60,6 +60,14 @@ public final class FileTree: @unchecked Sendable {
         records[index].duplicateGroupID = id
     }
 
+    // Applies a `DuplicateDetector.detect` result in one pass. Call on the
+    // main actor so no view reads `records` mid-write.
+    public func applyDuplicateGroups(_ assignments: [Int: UUID?]) {
+        for (index, id) in assignments where index < records.count {
+            records[index].duplicateGroupID = id
+        }
+    }
+
     public func setSafety(_ level: SafetyLevel, at index: Int) {
         records[index].safetyLevel = level
     }

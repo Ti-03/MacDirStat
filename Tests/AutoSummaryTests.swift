@@ -21,11 +21,8 @@ final class AutoSummaryTests: XCTestCase {
         return try await body()
     }
 
-    // The app's default excludedFolderNames already contains "node_modules"
-    // (it is fully skipped, not just collapsed - see ScanConfig's default in
-    // FileScanner.swift), so tests exercising the node_modules named-layout
-    // shortcut must use a config where it is NOT excluded, exactly like a
-    // user who removed it from their exclusion list would see.
+    // Pins the exclusion list for the duration of a test so results don't
+    // depend on whatever the developer's own UserDefaults happen to hold.
     private func withExcludedFolderNames<T>(_ names: String, _ body: () async throws -> T) async rethrows -> T {
         let prior = UserDefaults.standard.string(forKey: "excludedFolderNames")
         UserDefaults.standard.set(names, forKey: "excludedFolderNames")

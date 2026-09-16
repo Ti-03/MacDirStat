@@ -48,6 +48,22 @@ public struct FileNode: Identifiable, Hashable, Sendable {
         return (0..<count).map { FileNode(tree: tree, index: tree.childIndices[start + $0]) }
     }
 
+    // A directory the chart can descend into. Auto-summarized folders keep
+    // `isDirectory` but have no materialized children, so drilling into one
+    // would show an empty chart.
+    public var isDrillable: Bool {
+        isDirectory && !isAutoSummarized && tree.childCount[index] > 0
+    }
+
+    // "12,431 files, summarized" / "8 items" for tooltips and rows.
+    public var itemCountLabel: String {
+        if isAutoSummarized {
+            return "\(descendantFileCount.formatted()) files, summarized"
+        }
+        let count = tree.childCount[index]
+        return count == 1 ? "1 item" : "\(count.formatted()) items"
+    }
+
     public var optionalChildren: [FileNode]? {
         guard isDirectory, tree.childCount[index] > 0 else { return nil }
         return children

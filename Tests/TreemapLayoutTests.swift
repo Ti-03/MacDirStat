@@ -52,6 +52,23 @@ final class TreemapLayoutTests: XCTestCase {
         XCTAssertEqual(ByteFormatter.string(from: 500), "500 B")
     }
 
+    func test_byte_formatter_steps_up_at_unit_boundary() {
+        // 999,950 B used to print as "1000.0 KB".
+        XCTAssertEqual(ByteFormatter.string(from: 999_950), "1.0 MB")
+        XCTAssertEqual(ByteFormatter.string(from: 999_949), "999.9 KB")
+        XCTAssertEqual(ByteFormatter.string(from: 999_999_999_950), "1.0 TB")
+        XCTAssertEqual(ByteFormatter.string(from: 1_073_741_824, binary: true), "1.0 GiB")
+        XCTAssertEqual(ByteFormatter.string(from: 1_023, binary: true), "1023 B")
+    }
+
+    // Regression: an angle threshold dropped every child below 0.29% of the
+    // parent, so a flat folder of ~350+ similar files drew nothing at all.
+    func test_layout_many_equal_small_children_still_draws_cells() {
+        let root = makeTree((0..<600).map { ("f\($0).txt", Int64(1_000)) })
+        let cells = TreemapLayout.compute(root: root, in: CGRect(x: 0, y: 0, width: 600, height: 600), colorMap: ExtensionColorMap(root: root))
+        XCTAssertEqual(cells.count, 600)
+    }
+
     // MARK: - Helpers
 
     // Builds an FSNode fixture (as before) and converts it to a FileTree,

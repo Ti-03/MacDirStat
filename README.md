@@ -63,7 +63,8 @@ cd MacDirStat
 swift run
 ```
 
-Requires macOS 14+ and Xcode 15+.
+The app itself runs on **macOS 13 Ventura or later**. Building from source
+with SwiftPM needs macOS 14+ and Xcode 15+.
 
 ### Verify a release
 

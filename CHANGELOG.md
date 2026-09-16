@@ -3,6 +3,95 @@
 All notable changes to MacDirStat are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.4.1] - 2026-09-08
+
+A correctness release: the scan total is now right by default, and a long
+list of user-visible bugs found in an end-to-end audit are fixed.
+
+### Fixed
+
+- **Totals were wrong by default.** The factory settings excluded `.git`,
+  `node_modules`, `DerivedData` and `.Trash` and skipped every hidden entry,
+  so a real 7.5 GB project scanned as 40 MB. Nothing is excluded now and
+  hidden entries are counted; dependency and cache trees (`node_modules`,
+  `.git`, `Pods`, `.next`, `.venv`, ...) are collapsed into a single row
+  instead of dropped. Existing installs that still carry the old default
+  list are migrated once; a customised list is left alone. Verified
+  byte-for-byte against `du`.
+- The duplicate finder could report two different files as duplicates when
+  they shared the same on-disk size and first 64 KB (sparse or compressed
+  files), so "Delete All Duplicates" could trash a distinct file.
+- Errors from scanning, saving, opening, comparing, exporting and trashing
+  were recorded but never shown; they now appear as an alert.
+- A flat folder with a few hundred similar-size files drew an empty chart
+  labelled "This folder contains no files".
+- Collapsed folders (`node_modules` and friends) could be drilled into,
+  leaving an empty chart with the Back control hidden.
+- Purgeable space (local snapshots, evictable caches) was reported as
+  "Hidden & Unreadable Space" on volume scans; the figure now matches what
+  Finder counts as used. Full Disk Access is detected by actually opening a
+  protected file, on either TCC database (issue #24).
+- A scan that finished while a newer scan or archive load was in progress
+  could install its results over the newer one, keep watching the old
+  folder, or flip a live scan read-only.
+- Live refresh did its disk walk on the main thread (UI stalls during
+  builds) and could resurrect a folder that had just been trashed.
+- Trashing while duplicate detection was still running left "Scanning for
+  duplicates…" spinning until the next rescan.
+- Symlinked scan roots (`/tmp`, alias folders) failed with a raw error
+  instead of scanning their target.
+- A full scan of the boot volume now accounts for every readable byte:
+  854.9 GB of 8.5 million items on a 907 GB container, with the remainder
+  being the Preboot and Recovery volumes plus purgeable snapshot space that
+  no file scanner can show. That remainder is reported as one synthetic
+  row, renamed from "Hidden & Unreadable Space" to "System & Unreadable
+  Space" now that hidden files are actually scanned. Verified in the
+  installed app: 881.2 GB shown for a volume Finder reports at 880 GB used.
+- Existing installs also had 1.3's "hide hidden files" default persisted in
+  their preferences; the one-time migration now resets that too (a toggle
+  set afterwards is respected), which was worth another 260 GB on a real
+  home folder (~/.cache, ~/.ollama, .git, .Trash and friends).
+- The "Full Disk Access required" banner no longer appears once the grant
+  is held: whatever is still denied then is root-only and no setting can
+  open it (issue #24). Locked folders keep their icon; Settings shows the
+  count.
+- The file list said "Scanning…" for minutes after a large scan had
+  finished while safety tags were computed; tagging is now an incremental
+  path walk (no per-node URL) and the panel says "Preparing…" meanwhile.
+- Live refresh re-hashed the entire tree for duplicates on every change
+  batch; it now hashes only the size buckets the changed folder touches,
+  and duplicate results are written on the main thread instead of racing
+  the views.
+- Move to Trash runs off the main thread, so "Delete All Duplicates" over
+  thousands of files no longer freezes the window.
+- Comparing two scans no longer lists every file under a folder as
+  "removed" when that folder became a collapsed summary between the two
+  scans; it reports the folder's own growth instead.
+- Chart labels no longer print on top of each other or spill past their
+  arc ("PlugInsMediaProvMotionEffect.fxp"); long names are middle-truncated
+  to fit, labels that would be meaningless are dropped, and inner-ring
+  labels slide clear of the center disc instead of being cut off by it.
+- The file list panel was narrow enough that names truncated to three
+  letters ("Fina…"); it now keeps room for the name column.
+- Smaller polish: clicking empty chart space clears the selection (and the
+  30 fps pulse timer that ran forever after the first click); the synthetic
+  hidden-space row no longer offers Reveal/Copy Path/Trash or shows up in
+  the legend as "(directory)"; extensionless files are "(no extension)";
+  the legend recolors with the color scheme and sizes refresh when the
+  unit style changes; "1000.0 KB" now reads "1.0 MB"; selected list rows
+  are readable in light mode; expansion state and duplicate-group
+  expansion survive deletes; the sidebar Duplicates link that stranded the
+  user in the detail pane is gone; Export CSV is disabled with no scan
+  loaded; the toolbar shows progress while comparing.
+
+## [1.4.0] - 2026-08-25 (Mac App Store)
+
+- Back on the Mac App Store after 1.0: a sandboxed store configuration
+  built from the same source as the Developer ID release, with Sparkle
+  removed from the store bundle and "auto-scan last folder" carried through
+  a security-scoped bookmark. Full Disk Access features are hidden in the
+  store build, since a sandboxed app cannot hold that grant.
+
 ## [1.3.0] - 2026-08-04
 
 A performance-focused release: the scanner, the in-memory tree, and live

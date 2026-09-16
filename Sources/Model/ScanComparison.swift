@@ -50,6 +50,25 @@ public enum ScanComparison {
         let beforeIndex = relativePathIndex(of: before)
         let afterIndex = relativePathIndex(of: after)
 
+        // A directory auto-summarized on EITHER side has no materialized
+        // children there, so its descendants on the other side would all
+        // read as added/removed even though nothing under it changed. Those
+        // descendants are suppressed and the directory itself is reported as
+        // one grew/shrank row instead (directories are otherwise never
+        // reported for size changes, see below).
+        var summarizedDirs = Set<String>()
+        for (path, i) in beforeIndex where before.records[i].isAutoSummarized { summarizedDirs.insert(path) }
+        for (path, i) in afterIndex where after.records[i].isAutoSummarized { summarizedDirs.insert(path) }
+        func underSummarizedDirectory(_ relativePath: String) -> Bool {
+            guard !summarizedDirs.isEmpty else { return false }
+            var current = parentRelativePath(of: relativePath)
+            while let path = current {
+                if summarizedDirs.contains(path) { return true }
+                current = parentRelativePath(of: path)
+            }
+            return false
+        }
+
         var changes: [ScanChange] = []
 
         // Added: present in `after`, absent from `before`. Collapsed to the
@@ -59,7 +78,7 @@ public enum ScanComparison {
         // is skipped here, since it's implied by the directory's own
         // "added" row, exactly like Radix's diff-row suppression.
         for (relativePath, afterNodeIndex) in afterIndex {
-            guard beforeIndex[relativePath] == nil else { continue }
+            guard beforeIndex[relativePath] == nil, !underSummarizedDirectory(relativePath) else { continue }
             // The parent counts as pre-existing only if it was there AND was
             // already a directory. If it was a *file* that has since become a
             // directory, everything now inside it is new content implied by
@@ -84,7 +103,7 @@ public enum ScanComparison {
         // present in `after`) — only the topmost removed node per subtree is
         // reported.
         for (relativePath, beforeNodeIndex) in beforeIndex {
-            guard afterIndex[relativePath] == nil else { continue }
+            guard afterIndex[relativePath] == nil, !underSummarizedDirectory(relativePath) else { continue }
             // Mirror of the added-side rule: if the parent is now a file where
             // it used to be a directory, this node's disappearance is implied
             // by the parent's "replaced" row.
@@ -132,12 +151,14 @@ public enum ScanComparison {
                 continue
             }
 
-            guard !beforeRecord.isDirectory, !afterRecord.isDirectory else { continue }
+            if underSummarizedDirectory(relativePath) { continue }
+            let summarizedHere = beforeRecord.isAutoSummarized || afterRecord.isAutoSummarized
+            guard !beforeRecord.isDirectory || summarizedHere else { continue }
             guard beforeRecord.size != afterRecord.size else { continue }
             changes.append(ScanChange(
                 relativePath: relativePath,
                 name: afterRecord.name,
-                isDirectory: false,
+                isDirectory: afterRecord.isDirectory,
                 kind: afterRecord.size > beforeRecord.size ? .grew : .shrank,
                 beforeSize: beforeRecord.size,
                 afterSize: afterRecord.size

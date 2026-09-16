@@ -44,7 +44,7 @@ struct ExtensionListView: View {
                               systemImage: "internaldrive")
                             .monospacedDigit()
                         if node.isDirectory {
-                            Label("\(node.children.count) items",
+                            Label(node.itemCountLabel,
                                   systemImage: "folder")
                         } else if !node.fileExtension.isEmpty {
                             Text(".\(node.fileExtension.uppercased())")
@@ -61,13 +61,15 @@ struct ExtensionListView: View {
                 Spacer(minLength: 12)
 
                 // Quick-action buttons
-                HStack(spacing: 4) {
-                    iconButton("doc.on.doc.fill", help: "Copy path") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(node.url.path, forType: .string)
-                    }
-                    iconButton("folder.fill", help: "Reveal in Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([node.url])
+                if !node.isSynthetic {
+                    HStack(spacing: 4) {
+                        iconButton("doc.on.doc.fill", help: "Copy path") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(node.url.path, forType: .string)
+                        }
+                        iconButton("folder.fill", help: "Reveal in Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([node.url])
+                        }
                     }
                 }
             }

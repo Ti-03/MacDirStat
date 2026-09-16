@@ -34,7 +34,7 @@ final class DuplicateDetectorTests: XCTestCase {
         let tree = FileTreeBuilder.build(from: root, rootPath: tmp.path)
 
         let detector = DuplicateDetector()
-        await detector.detect(in: tree)
+        if let groups = await detector.detect(in: tree) { tree.applyDuplicateGroups(groups) }
 
         let copy1 = index(in: tree, named: "copy1.bin")!
         let copy2 = index(in: tree, named: "copy2.bin")!
@@ -44,6 +44,48 @@ final class DuplicateDetectorTests: XCTestCase {
         XCTAssertNotNil(tree.records[copy2].duplicateGroupID)
         XCTAssertEqual(tree.records[copy1].duplicateGroupID, tree.records[copy2].duplicateGroupID)
         XCTAssertNil(tree.records[unique].duplicateGroupID, "unique file must not be grouped")
+    }
+
+    // Regression: `record.size` is the ALLOCATED size. Two sparse files that
+    // share their first 64 KB, occupy the same few blocks on disk, but differ
+    // in their tails were declared duplicates because the small-allocated-size
+    // shortcut treated the 64 KB quick hash as a full-content hash.
+    func test_sparse_files_with_same_head_and_different_tail_are_not_duplicates() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        func writeSparse(_ url: URL, tail: UInt8) throws {
+            try Data(repeating: 7, count: 8192).write(to: url)
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seek(toOffset: 4 * 1024 * 1024)
+            try handle.write(contentsOf: Data([tail]))
+        }
+        let a = tmp.appendingPathComponent("a.bin")
+        let b = tmp.appendingPathComponent("b.bin")
+        let c = tmp.appendingPathComponent("c.bin")
+        try writeSparse(a, tail: 1)
+        try writeSparse(b, tail: 2)
+        try writeSparse(c, tail: 1)   // genuinely identical to a
+
+        // `size` in the tree is the ALLOCATED size the scanner records. Pin it
+        // to what a sparse file occupies so the test does not depend on the
+        // filesystem actually punching a hole: the point is that the detector
+        // must not trust a small allocated size as "the quick hash saw it all".
+        let root = FSNode(url: tmp, name: "root", isDirectory: true, size: 0, fileExtension: "", parent: nil)
+        for url in [a, b, c] {
+            let child = FSNode(url: url, name: url.lastPathComponent, isDirectory: false, size: 12_288, fileExtension: "bin", parent: root)
+            root.children.append(child)
+            root.size += child.size
+        }
+        let tree = FileTreeBuilder.build(from: root, rootPath: tmp.path)
+        if let groups = await DuplicateDetector().detect(in: tree) { tree.applyDuplicateGroups(groups) }
+
+        let ia = index(in: tree, named: "a.bin")!, ib = index(in: tree, named: "b.bin")!, ic = index(in: tree, named: "c.bin")!
+        XCTAssertNotNil(tree.records[ia].duplicateGroupID)
+        XCTAssertEqual(tree.records[ia].duplicateGroupID, tree.records[ic].duplicateGroupID, "a and c are identical")
+        XCTAssertNil(tree.records[ib].duplicateGroupID, "b differs in its tail and must not be grouped")
     }
 
     func test_small_files_below_threshold_are_skipped() async throws {
@@ -65,7 +107,7 @@ final class DuplicateDetectorTests: XCTestCase {
         let tree = FileTreeBuilder.build(from: root, rootPath: tmp.path)
 
         let detector = DuplicateDetector()
-        await detector.detect(in: tree)
+        if let groups = await detector.detect(in: tree) { tree.applyDuplicateGroups(groups) }
 
         let tiny1 = index(in: tree, named: "tiny1.txt")!
         let tiny2 = index(in: tree, named: "tiny2.txt")!
@@ -98,7 +140,7 @@ final class DuplicateDetectorTests: XCTestCase {
         let tree = FileTreeBuilder.build(from: root, rootPath: tmp.path)
 
         let detector = DuplicateDetector()
-        await detector.detect(in: tree)
+        if let groups = await detector.detect(in: tree) { tree.applyDuplicateGroups(groups) }
 
         let a = index(in: tree, named: "a.bin")!
         let b = index(in: tree, named: "b.bin")!
@@ -129,7 +171,7 @@ final class DuplicateDetectorTests: XCTestCase {
         let tree = FileTreeBuilder.build(from: root, rootPath: tmp.path)
 
         let detector = DuplicateDetector()
-        await detector.detect(in: tree)
+        if let groups = await detector.detect(in: tree) { tree.applyDuplicateGroups(groups) }
 
         let s1 = index(in: tree, named: "s1.bin")!
         let s2 = index(in: tree, named: "s2.bin")!
@@ -175,7 +217,7 @@ final class DuplicateDetectorTests: XCTestCase {
         let tree = FileTreeBuilder.build(from: root, rootPath: tmp.path)
 
         let detector = DuplicateDetector()
-        await detector.detect(in: tree)
+        if let groups = await detector.detect(in: tree) { tree.applyDuplicateGroups(groups) }
 
         var seenGroupIDs = Set<UUID>()
         for (nameA, nameB) in pairNames {
@@ -190,5 +232,32 @@ final class DuplicateDetectorTests: XCTestCase {
             }
         }
         XCTAssertEqual(seenGroupIDs.count, pairCount)
+    }
+}
+
+final class DuplicateDetectorFocusTests: XCTestCase {
+    func test_focus_only_examines_matching_size_buckets() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let small = Data(repeating: 5, count: 8192)
+        let large = Data(repeating: 9, count: 16384)
+        let files: [(String, Data)] = [("s1.bin", small), ("s2.bin", small), ("l1.bin", large), ("l2.bin", large)]
+        let root = FSNode(url: tmp, name: "root", isDirectory: true, size: 0, fileExtension: "", parent: nil)
+        for (name, data) in files {
+            let url = tmp.appendingPathComponent(name)
+            try data.write(to: url)
+            root.children.append(FSNode(url: url, name: name, isDirectory: false, size: Int64(data.count), fileExtension: "bin", parent: root))
+        }
+        let tree = FileTreeBuilder.build(from: root, rootPath: tmp.path)
+        let idx = { (n: String) in tree.records.firstIndex { $0.name == n }! }
+
+        // Focus on the small pair only: the large pair is never touched.
+        let detected = await DuplicateDetector().detect(in: tree, focusing: [idx("s1.bin")])
+        let result = try XCTUnwrap(detected)
+        XCTAssertEqual(Set(result.keys), [idx("s1.bin"), idx("s2.bin")])
+        XCTAssertNotNil(result[idx("s1.bin")]!)
+        XCTAssertEqual(result[idx("s1.bin")]!, result[idx("s2.bin")]!)
     }
 }

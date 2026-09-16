@@ -16,7 +16,13 @@ public struct TreemapLayout {
 
     static let centerRadius: CGFloat = 76
     private static let maxDepth = 5
-    private static let minArcAngle: Double = 0.018
+    // Arcs thinner than this at their outer edge are skipped (their angle
+    // is still consumed so siblings keep their true proportions). Angle-based
+    // thresholds made any folder with ~350+ similar-size children render as
+    // an empty chart; a length threshold only drops arcs that can't be seen.
+    // ponytail: sub-pixel siblings are dropped rather than pooled into an
+    // "Other" arc; add pooling if a huge flat folder ever looks sparse.
+    private static let minArcLength: CGFloat = 0.75
 
     // Gentle per-depth darkening so deep files stay recognisable
     private static let depthDarken: [Double] = [0.0, 0.10, 0.18, 0.26, 0.32, 0.38]
@@ -66,7 +72,7 @@ public struct TreemapLayout {
             let arcAngle = fraction * totalAngle
             let arcEnd   = angle + arcAngle
 
-            guard arcAngle >= minArcAngle else { angle = arcEnd; continue }
+            guard CGFloat(arcAngle) * outerR >= minArcLength else { angle = arcEnd; continue }
 
             let cellColor = color(for: child, depth: depth, colorMap: colorMap)
 

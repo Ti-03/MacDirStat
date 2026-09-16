@@ -472,11 +472,10 @@ final class ScanViewModelPruneTests: XCTestCase {
         vm.select(target)
 
         let trashed = vm.trashNode(target)
-        XCTAssertTrue(trashed, "trashNode should report success for a real, trashable file")
+        XCTAssertTrue(trashed, "trashNode should accept a real, trashable file")
 
-        // The prune itself (tree/selection/drillStack/colorMap) is synchronous;
-        // only the off-thread extension-summary/duplicate-group passes need
-        // waiting for.
+        // The move runs off the main actor and the prune lands when it finishes.
+        await waitUntil { vm.root?.children.count == 1 }
         XCTAssertFalse(FileManager.default.fileExists(atPath: toDeleteURL.path), "trashItem should have actually moved the file out of tmp")
         guard let newRoot = vm.root else { return XCTFail("tree must still exist after a prune") }
         XCTAssertEqual(newRoot.children.map(\.name), ["keep.bin"], "the trashed node must be gone from the live tree")

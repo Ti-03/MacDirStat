@@ -1,0 +1,9 @@
+Totals you can trust, and a long list of fixes.
+
+• Every byte is counted. DirStat no longer skips hidden folders or dependency folders like node_modules, .git and DerivedData by default. On a real project folder the total went from 40 MB to the correct 7.5 GB; on a whole Mac it now matches what Finder reports as used.
+• Dependency and cache folders collapse into a single row instead of thousands of tiny files, so scans stay fast and the chart stays readable.
+• The duplicate finder no longer reports two different files as duplicates when they merely share a size and a first chunk.
+• Errors are shown instead of silently ignored: failed scans, saves, exports and moves to Trash now tell you what happened.
+• The chart no longer comes up empty for folders with hundreds of similar files, labels no longer overlap, and collapsed folders can't be opened into a dead end.
+• Live refresh and Move to Trash no longer stall the window on large folders.
+• Many smaller fixes: readable selection in light mode, unit changes apply immediately, "1000.0 KB" reads "1.0 MB", and more.

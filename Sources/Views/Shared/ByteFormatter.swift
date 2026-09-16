@@ -1,33 +1,26 @@
 import Foundation
 
 public enum ByteFormatter {
+    private static let decimalUnits = ["B", "KB", "MB", "GB", "TB", "PB"]
+    private static let binaryUnits = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]
+
     /// Formats bytes using the user's chosen unit style (decimal SI or binary IEC).
     public static func string(from bytes: Int64) -> String {
-        let binary = UserDefaults.standard.bool(forKey: "useBinarySize")
-        if binary {
-            let kib: Int64 = 1_024
-            let mib = kib * 1_024
-            let gib = mib * 1_024
-            let tib = gib * 1_024
-            switch bytes {
-            case tib...: return String(format: "%.1f TiB", Double(bytes) / Double(tib))
-            case gib...: return String(format: "%.1f GiB", Double(bytes) / Double(gib))
-            case mib...: return String(format: "%.1f MiB", Double(bytes) / Double(mib))
-            case kib...: return String(format: "%.1f KiB", Double(bytes) / Double(kib))
-            default:     return "\(bytes) B"
-            }
-        } else {
-            let kb: Int64 = 1_000
-            let mb = kb * 1_000
-            let gb = mb * 1_000
-            let tb = gb * 1_000
-            switch bytes {
-            case tb...: return String(format: "%.1f TB", Double(bytes) / Double(tb))
-            case gb...: return String(format: "%.1f GB", Double(bytes) / Double(gb))
-            case mb...: return String(format: "%.1f MB", Double(bytes) / Double(mb))
-            case kb...: return String(format: "%.1f KB", Double(bytes) / Double(kb))
-            default:    return "\(bytes) B"
-            }
+        string(from: bytes, binary: UserDefaults.standard.bool(forKey: "useBinarySize"))
+    }
+
+    public static func string(from bytes: Int64, binary: Bool) -> String {
+        let base: Double = binary ? 1_024 : 1_000
+        let units = binary ? binaryUnits : decimalUnits
+        var value = Double(bytes)
+        var unit = 0
+        // Step up while the value would still print as "1000.0" or more, so a
+        // hair under a unit boundary reads "1.0 MB" instead of "1000.0 KB".
+        while unit < units.count - 1, value >= base - 0.05 {
+            value /= base
+            unit += 1
         }
+        if unit == 0 { return "\(bytes) B" }
+        return String(format: "%.1f %@", value, units[unit])
     }
 }

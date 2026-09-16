@@ -14,25 +14,27 @@ struct DirectoryTreeView: View {
                             Text(node.name).fontWeight(.semibold)
                             Text(ByteFormatter.string(from: node.size))
                                 .foregroundStyle(.secondary)
-                            Divider()
-                            Button {
-                                NSWorkspace.shared.activateFileViewerSelecting([node.url])
-                            } label: {
-                                Label("Reveal in Finder", systemImage: "folder.viewfinder")
+                            if !node.isSynthetic {
+                                Divider()
+                                Button {
+                                    NSWorkspace.shared.activateFileViewerSelecting([node.url])
+                                } label: {
+                                    Label("Reveal in Finder", systemImage: "folder.viewfinder")
+                                }
+                                Button {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(node.url.path, forType: .string)
+                                } label: {
+                                    Label("Copy Path", systemImage: "doc.on.clipboard")
+                                }
+                                Button {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(node.name, forType: .string)
+                                } label: {
+                                    Label("Copy Name", systemImage: "textformat")
+                                }
                             }
-                            Button {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(node.url.path, forType: .string)
-                            } label: {
-                                Label("Copy Path", systemImage: "doc.on.clipboard")
-                            }
-                            Button {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(node.name, forType: .string)
-                            } label: {
-                                Label("Copy Name", systemImage: "textformat")
-                            }
-                            if node.isDirectory {
+                            if node.isDrillable {
                                 Divider()
                                 Button {
                                     vm.drillDown(into: node)
@@ -40,7 +42,7 @@ struct DirectoryTreeView: View {
                                     Label("Open in Chart", systemImage: "arrow.down.right.circle")
                                 }
                             }
-                            if !vm.isReadOnlySnapshot {
+                            if !vm.isReadOnlySnapshot && !node.isSynthetic {
                                 Divider()
                                 Button(role: .destructive) {
                                     vm.trashNode(node)
@@ -50,17 +52,19 @@ struct DirectoryTreeView: View {
                             }
                         }
                 }
+                .id(ObjectIdentifier(root.tree))
                 .listStyle(.inset)
                 .scrollContentBackground(.hidden)
                 .background(.ultraThinMaterial)
             } else {
-                ScanningPlaceholder(items: vm.itemsScanned, bytes: vm.bytesFound)
+                ScanningPlaceholder(title: vm.isScanning ? "Scanning…" : "Preparing…", items: vm.itemsScanned, bytes: vm.bytesFound)
             }
         }
     }
 }
 
 private struct ScanningPlaceholder: View {
+    let title: String
     let items: Int
     let bytes: Int64
 
@@ -68,7 +72,7 @@ private struct ScanningPlaceholder: View {
         VStack(spacing: 16) {
             ProgressView().scaleEffect(1.3)
             VStack(spacing: 4) {
-                Text("Scanning…").font(.headline)
+                Text(title).font(.headline)
                 Text("\(items) items · \(ByteFormatter.string(from: bytes))")
                     .font(.subheadline).foregroundStyle(.secondary)
                     .monospacedDigit()
@@ -99,17 +103,17 @@ private struct NodeRow: View {
                 .font(.system(size: 12.5))
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .foregroundStyle(isSelected ? .white : .primary)
+                .foregroundStyle(.primary)
 
             // Inline extension badge for files
             if !node.isDirectory, !node.fileExtension.isEmpty {
                 Text(node.fileExtension.uppercased())
                     .font(.system(size: 7.5, weight: .bold, design: .monospaced))
-                    .foregroundStyle(isSelected ? Color.white.opacity(0.65) : Color.secondary.opacity(0.5))
+                    .foregroundStyle(Color.secondary.opacity(0.5))
                     .padding(.horizontal, 3)
                     .padding(.vertical, 1.5)
                     .background(
-                        isSelected ? Color.white.opacity(0.15) : Color.primary.opacity(0.07),
+                        Color.primary.opacity(0.07),
                         in: RoundedRectangle(cornerRadius: 3)
                     )
                     .fixedSize()
@@ -140,7 +144,7 @@ private struct NodeRow: View {
             if node.isAutoSummarized {
                 Text("(\(node.descendantFileCount) files, summarized)")
                     .font(.system(size: 9.5))
-                    .foregroundStyle(isSelected ? Color.white.opacity(0.55) : Color.secondary.opacity(0.65))
+                    .foregroundStyle(Color.secondary.opacity(0.65))
                     .lineLimit(1)
                     .fixedSize()
                     .help("Collapsed to keep the scan fast: contents aren't browsable individually")
@@ -149,7 +153,7 @@ private struct NodeRow: View {
             // Size
             Text(ByteFormatter.string(from: node.size))
                 .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(isSelected ? Color.white.opacity(0.9) : .primary)
+                .foregroundStyle(.primary)
                 .monospacedDigit()
                 .lineLimit(1)
                 .fixedSize()
@@ -157,7 +161,7 @@ private struct NodeRow: View {
             // Percentage of parent — fixed width so sizes stay aligned
             Text(percentageOfParent ?? "")
                 .font(.system(size: 10))
-                .foregroundStyle(isSelected ? Color.white.opacity(0.55) : Color.secondary.opacity(0.65))
+                .foregroundStyle(Color.secondary.opacity(0.65))
                 .monospacedDigit()
                 .frame(width: 36, alignment: .trailing)
                 .lineLimit(1)

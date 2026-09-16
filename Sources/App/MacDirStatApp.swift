@@ -1,15 +1,44 @@
 import SwiftUI
+#if !APPSTORE
 import Sparkle
+#endif
 import UniformTypeIdentifiers
+
+/// Which distribution channel this binary was built for. The `APPSTORE`
+/// compilation condition is set only by the AppStore build configuration.
+///
+/// App Store builds are sandboxed, which rules out two things the Developer ID
+/// build relies on: Sparkle self-updates (App Review guideline 2.4.5) and Full
+/// Disk Access (a sandboxed app can never hold it, so the onboarding flow would
+/// send users to System Settings for nothing).
+enum Build {
+    #if APPSTORE
+    static let isAppStore = true
+    #else
+    static let isAppStore = false
+    #endif
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    // The App Store build quits with its last window, matching how 1.0 shipped.
+    // The Developer ID build stays resident so its Sparkle updater keeps
+    // running, which is the whole point of that track.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        Build.isAppStore
+    }
+}
 
 @main
 struct MacDirStatApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var vm = ScanViewModel()
+    #if !APPSTORE
     private let updaterController = SPUStandardUpdaterController(
         startingUpdater: true,
         updaterDelegate: nil,
         userDriverDelegate: nil
     )
+    #endif
 
     var body: some Scene {
         WindowGroup("DirStat") {
@@ -43,6 +72,7 @@ struct MacDirStatApp: App {
                     NotificationCenter.default.post(name: .exportCSV, object: nil)
                 }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
+                .disabled(vm.tree == nil)
 
                 Button("Compare With Saved Scan…") {
                     compareWithSavedScanPicker(vm: vm)
@@ -51,16 +81,20 @@ struct MacDirStatApp: App {
                 .disabled(vm.tree == nil)
             }
             CommandGroup(after: .appInfo) {
+                #if !APPSTORE
                 Button("Check for Updates…") {
                     updaterController.checkForUpdates(nil)
                 }
+                #endif
                 Button("Visit Website") {
                     NSWorkspace.shared.open(URL(string: "https://ti-03.github.io/MacDirStat/")!)
                 }
             }
             CommandGroup(after: .help) {
-                Button("Grant Full Disk Access…") {
-                    vm.showFDASheet = true
+                if !Build.isAppStore {
+                    Button("Grant Full Disk Access…") {
+                        vm.showFDASheet = true
+                    }
                 }
             }
         }
