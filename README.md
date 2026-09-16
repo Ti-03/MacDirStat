@@ -53,7 +53,7 @@ MacDirStat scans any folder and turns your filesystem into an interactive sunbur
 
 **[Download on the Mac App Store](https://apps.apple.com/app/dirstat/id6766033292?mt=12)** — published as **DirStat**.
 
-Or grab the DMG directly from **[Releases](https://github.com/Ti-03/MacDirStat/releases)** — open it and drag the app to your Applications folder. It updates itself automatically via the Help menu once installed.
+Or download it directly from **[Releases](https://github.com/Ti-03/MacDirStat/releases)** — unzip and drag **DirStat** to your Applications folder. The app is signed and notarized by Apple, so it opens with no security prompt, and it updates itself from the Help menu once installed.
 
 **Build from source**
 
